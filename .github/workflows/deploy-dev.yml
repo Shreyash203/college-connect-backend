@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/shreyash203/college-connect-backend:dev
+  IMAGE_REPOSITORY: ghcr.io/shreyash203/college-connect-backend
 
 jobs:
   build-and-push:
@@ -31,7 +31,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}
+          tags: |
+            ${{ env.IMAGE_REPOSITORY }}:dev
+            ${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
 
   deploy:
     runs-on: ubuntu-latest
@@ -56,4 +58,4 @@ jobs:
           az containerapp update \
             -n ca-college-connect-api \
             -g rg-college-connect-dev \
-            --image $IMAGE_NAME
+            --image $IMAGE_REPOSITORY:${{ github.sha }}
