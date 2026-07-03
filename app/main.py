@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, profiles
+from app.core.config import settings
 from app.db.session import engine
 from app.db.models import Base
-from app.core.settings import settings  # NEW
+from app.db.schema_sync import sync_auth_schema
 
 Base.metadata.create_all(bind=engine)
+sync_auth_schema(engine)
 
 app = FastAPI(
     title="College Connect API",

@@ -3,7 +3,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_current_user, get_db
+from app.core.dependencies import get_db
+from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import StudentProfile, Interest, User
 from app.schemas.profiles import ProfileCreate, ProfileRead
 
@@ -25,7 +26,7 @@ def profile_to_response(profile: StudentProfile) -> dict:
 @router.post("/profiles", response_model=ProfileRead)
 def create_profile(
     profile_in: ProfileCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     existing = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
@@ -60,7 +61,7 @@ def create_profile(
 
 
 @router.get("/profiles/me", response_model=ProfileRead)
-def get_my_profile(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_my_profile(current_user: User = Depends(get_current_verified_user), db: Session = Depends(get_db)):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")

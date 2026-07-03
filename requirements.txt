@@ -9,6 +9,8 @@ python-dotenv
 python-multipart
 email-validator
 pyodbc
+pymysql
 pydantic-settings
 azure-identity
 azure-keyvault-secrets
+azure-communication-email

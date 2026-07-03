@@ -29,6 +29,8 @@ Use Azure SQL for the primary database connection and store secrets in Azure Key
    - Set `DATABASE_URL` and `JWT_SECRET_KEY` directly in environment variables or a local `.env` file.
    - Set `AZURE_KEY_VAULT_NAME` and store secrets in Azure Key Vault.
 
+For Azure deployment, set `DATABASE_URL` to your Azure SQL connection string in Container Apps environment variables or Azure Key Vault rather than committing it to the repository.
+
 3. Example Azure SQL connection string:
    ```text
    mssql+pyodbc://<username>:<password>@<server>.database.windows.net/<database>?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no
@@ -41,7 +43,7 @@ Use Azure SQL for the primary database connection and store secrets in Azure Key
    az keyvault secret set --vault-name <vault-name> --name DATABASE_URL --value "<connection-string>"
    az keyvault secret set --vault-name <vault-name> --name JWT_SECRET_KEY --value "<jwt-secret>"
    az keyvault secret set --vault-name <vault-name> --name ACCESS_TOKEN_EXPIRE_MINUTES --value "60"
-   az keyvault secret set --vault-name <vault-name> --name AUTHORIZED_EMAIL_DOMAIN --value "iith.ac.in"
+   az keyvault secret set --vault-name <vault-name> --name AUTHORIZED_EMAIL_DOMAINS --value "iith.ac.in"
    ```
 
 5. Configure runtime environment:
@@ -51,4 +53,5 @@ Use Azure SQL for the primary database connection and store secrets in Azure Key
 ## Notes
 - Default local fallback remains SQLite at `backend.db` if `DATABASE_URL` is not provided.
 - Do not commit `.env` or secrets to source control.
-- Authorized email domain is configurable via `AUTHORIZED_EMAIL_DOMAIN`.
+- Authorized email domains are configurable via `AUTHORIZED_EMAIL_DOMAINS`.
+- Local Angular development uses `http://localhost:4200`, so set `CORS_ORIGINS` accordingly.
