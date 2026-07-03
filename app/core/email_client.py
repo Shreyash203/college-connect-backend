@@ -6,6 +6,26 @@ from azure.core.credentials import AzureKeyCredential
 from app.core.config import settings
 
 
+def _normalize_acs_connection_string(connection_string: str) -> str:
+    normalized_parts: list[str] = []
+
+    for raw_part in connection_string.split(";"):
+        part = raw_part.strip()
+        if not part or "=" not in part:
+            continue
+
+        key, value = part.split("=", 1)
+        normalized_key = key.strip().lower()
+        normalized_value = value.strip()
+
+        if normalized_key == "endpoint" and normalized_value and not normalized_value.endswith("/"):
+            normalized_value = f"{normalized_value}/"
+
+        normalized_parts.append(f"{normalized_key}={normalized_value}")
+
+    return ";".join(normalized_parts)
+
+
 class EmailService:
     def __init__(self):
         self.client = None
@@ -20,7 +40,9 @@ class EmailService:
 
         connection_string = getattr(settings, "ACS_EMAIL_CONNECTION_STRING", None)
         if connection_string:
-            self.client = EmailClient.from_connection_string(connection_string)
+            self.client = EmailClient.from_connection_string(
+                _normalize_acs_connection_string(connection_string)
+            )
             return
 
         endpoint = getattr(settings, "ACS_EMAIL_ENDPOINT", None)

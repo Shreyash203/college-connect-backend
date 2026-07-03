@@ -11,6 +11,16 @@ class FakeEmailClient:
 
 
 class EmailClientFallbackTests(unittest.TestCase):
+    def test_normalize_acs_connection_string_lowercases_keys_and_adds_trailing_slash(self):
+        connection_string = "Endpoint=https://example.communication.azure.com;AccessKey=test-key"
+
+        normalized = email_client._normalize_acs_connection_string(connection_string)
+
+        self.assertEqual(
+            normalized,
+            "endpoint=https://example.communication.azure.com/;accesskey=test-key",
+        )
+
     def test_settings_supports_legacy_acs_fields(self):
         settings = Settings(ACS_EMAIL_ENDPOINT="https://example.communication.azure.com", ACS_EMAIL_API_KEY="test-key")
         self.assertEqual(settings.ACS_EMAIL_ENDPOINT, "https://example.communication.azure.com")
