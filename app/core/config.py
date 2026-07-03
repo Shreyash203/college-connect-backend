@@ -77,33 +77,36 @@ class Settings(BaseSettings):
             credential = DefaultAzureCredential()
             client = SecretClient(vault_url=vault_url, credential=credential)
 
-            secret_names = [
-                "DATABASE_URL",
-                "JWT_SECRET_KEY",
-                "ACCESS_TOKEN_EXPIRE_MINUTES",
-                "AUTHORIZED_EMAIL_DOMAINS",
-                "EMAIL_PROVIDER",
-                "EMAIL_FROM",
-                "ACS_EMAIL_SENDER",
-                "ACS_EMAIL_CONNECTION_STRING",
-                "ACS_EMAIL_ENDPOINT",
-                "ACS_EMAIL_API_KEY",
-                "APP_BASE_URL",
-                "EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES",
-                "CORS_ORIGINS",
+            secret_mappings = [
+                ("DATABASE_URL", "DATABASE-URL"),
+                ("JWT_SECRET_KEY", "JWT-SECRET-KEY"),
+                ("ACCESS_TOKEN_EXPIRE_MINUTES", "ACCESS-TOKEN-EXPIRE-MINUTES"),
+                ("AUTHORIZED_EMAIL_DOMAINS", "AUTHORIZED-EMAIL-DOMAINS"),
+                ("EMAIL_PROVIDER", "EMAIL-PROVIDER"),
+                ("EMAIL_FROM", "EMAIL-FROM"),
+                ("ACS_EMAIL_SENDER", "ACS-EMAIL-SENDER"),
+                ("ACS_EMAIL_CONNECTION_STRING", "ACS-EMAIL-CONNECTION-STRING"),
+                ("ACS_EMAIL_ENDPOINT", "ACS-EMAIL-ENDPOINT"),
+                ("ACS_EMAIL_API_KEY", "ACS-EMAIL-API-KEY"),
+                ("APP_BASE_URL", "APP-BASE-URL"),
+                ("EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES", "EMAIL-VERIFICATION-TOKEN-EXPIRE-MINUTES"),
+                ("CORS_ORIGINS", "CORS-ORIGINS"),
             ]
 
-            for secret_name in secret_names:
-                if getattr(model, secret_name) is None or secret_name not in os.environ:
-                    secret = client.get_secret(secret_name)
+            for setting_name, key_vault_secret_name in secret_mappings:
+                if setting_name in {"ACS_EMAIL_ENDPOINT", "ACS_EMAIL_API_KEY"} and model.ACS_EMAIL_CONNECTION_STRING:
+                    continue
+
+                if getattr(model, setting_name) is None or setting_name not in os.environ:
+                    secret = client.get_secret(key_vault_secret_name)
                     secret_value = secret.value
-                    if secret_name in {
+                    if setting_name in {
                         "ACCESS_TOKEN_EXPIRE_MINUTES",
                         "EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES",
                     }:
-                        setattr(model, secret_name, int(secret_value))
+                        setattr(model, setting_name, int(secret_value))
                     else:
-                        setattr(model, secret_name, secret_value)
+                        setattr(model, setting_name, secret_value)
 
         if model.DATABASE_URL is None:
             model.DATABASE_URL = "sqlite:///./backend.db"
