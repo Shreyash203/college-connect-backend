@@ -10,7 +10,6 @@ from app.db.session import SessionLocal
 from app.db.models import User, StudentProfile, profile_interests, PendingRegistration
 from app.schemas.auth import (
     DeleteUserRequest,
-    EmailVerificationRequest,
     UserCreate,
     Token,
     RegisterResponse,
@@ -171,27 +170,6 @@ def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
     _send_email_or_dev_fallback(to_address=pending.email, subject=subject, html_body=html_body, plain_body=plain_body)
 
     return {"message": "A new verification code has been sent to your email."}
-
-
-@router.post("/auth/verify-email")
-def verify_email(payload: EmailVerificationRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == payload.user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
-
-    if user.is_verified:
-        return {"message": "Email already verified."}
-
-    if not email_verification.is_verification_otp_valid(user, str(payload.otp)):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code.")
-
-    user.is_verified = True
-    user.verification_otp = None
-    user.verification_otp_expires_at = None
-    db.add(user)
-    db.commit()
-
-    return {"message": "Email verified successfully."}
 
 
 @router.post("/auth/login", response_model=Token)

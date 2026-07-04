@@ -30,11 +30,6 @@ class Token(BaseModel):
     user_id: int | None = None
 
 
-class EmailVerificationRequest(BaseModel):
-    user_id: int
-    otp: str
-
-
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
