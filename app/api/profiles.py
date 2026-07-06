@@ -60,6 +60,38 @@ def create_profile(
     return profile_to_response(profile)
 
 
+@router.put("/profiles/me", response_model=ProfileRead)
+def update_profile(
+    profile_in: ProfileCreate,
+    current_user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    # Update scalar fields
+    profile.display_name = profile_in.display_name
+    profile.department = profile_in.department
+    profile.year = profile_in.year
+    profile.bio = profile_in.bio
+
+    # Update interests
+    new_interests = []
+    for interest_name in profile_in.interests:
+        interest = db.query(Interest).filter(Interest.name == interest_name).first()
+        if not interest:
+            interest = Interest(name=interest_name)
+            db.add(interest)
+            db.commit()
+            db.refresh(interest)
+        new_interests.append(interest)
+    profile.interests = new_interests
+    db.commit()
+    db.refresh(profile)
+    return profile_to_response(profile)
+
+
 @router.get("/profiles/me", response_model=ProfileRead)
 def get_my_profile(current_user: User = Depends(get_current_verified_user), db: Session = Depends(get_db)):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
