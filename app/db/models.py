@@ -40,6 +40,7 @@ class PendingRegistration(Base):
 
 
 class StudentProfile(Base):
+    image_url = Column(String, nullable=True)  # URL to Azure Blob image
     __tablename__ = "student_profiles"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -60,3 +61,16 @@ class Interest(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), unique=True, nullable=False)
     profiles = relationship("StudentProfile", secondary=profile_interests, back_populates="interests")
+
+
+class MarketplaceItem(Base):
+    __tablename__ = "marketplace_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(String(1000), nullable=True)
+    image_url = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="marketplace_items")

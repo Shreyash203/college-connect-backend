@@ -12,5 +12,6 @@ pyodbc
 pymysql
 pydantic-settings
 azure-identity
+azure-storage-blob
 azure-keyvault-secrets
 azure-communication-email

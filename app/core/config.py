@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = Field("http://localhost:4200", env="CORS_ORIGINS")
 
     AZURE_KEY_VAULT_NAME: Optional[str] = Field(None, env="AZURE_KEY_VAULT_NAME")
+    AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
+    AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
 
     @property
     def authorized_email_domains_list(self) -> list[str]:

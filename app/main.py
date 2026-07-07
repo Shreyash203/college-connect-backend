@@ -1,12 +1,20 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, profiles
+from app.api import auth, profiles, marketplace
 from app.core.config import settings
 from app.db.session import engine
 from app.db.models import Base
 from app.db.schema_sync import sync_auth_schema
 
 Base.metadata.create_all(bind=engine)
+
+# Ensure image_url column exists for existing tables
+try:
+    with engine.begin() as conn:
+        conn.execute("ALTER TABLE student_profiles ADD COLUMN image_url VARCHAR(255) NULL;")
+except Exception:
+    # Column may already exist; ignore any errors
+    pass
 sync_auth_schema(engine)
 
 app = FastAPI(
@@ -25,6 +33,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
+app.include_router(marketplace.router, prefix="/api")
 
 @app.get("/")
 def root():

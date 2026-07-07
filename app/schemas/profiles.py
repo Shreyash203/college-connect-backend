@@ -12,6 +12,7 @@ class ProfileCreate(BaseModel):
 
 
 class ProfileRead(BaseModel):
+    image_url: Optional[str] = None
     id: int
     user_id: int
     display_name: Optional[str]
