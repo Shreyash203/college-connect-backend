@@ -7,17 +7,17 @@ class UserCreate(BaseModel):
 
 
 class RegisterResponse(BaseModel):
-    pending_id: int
+    pending_id: str
     message: str
 
 
 class VerifyRegistrationRequest(BaseModel):
-    pending_id: int
+    pending_id: str
     otp: str
 
 
 class ResendOtpRequest(BaseModel):
-    pending_id: int
+    pending_id: str
 
 
 class DeleteUserRequest(BaseModel):

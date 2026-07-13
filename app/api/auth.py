@@ -1,13 +1,18 @@
+import uuid
+import json
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+import redis.asyncio as aioredis
 
 from app.core import email_client, email_verification, security
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.db.models import User, StudentProfile, profile_interests, PendingRegistration
+from app.db.models import User, StudentProfile, profile_interests
+from app.core.redis import get_redis
+from app.core.rate_limiter import RateLimiter
 from app.schemas.auth import (
     DeleteUserRequest,
     UserCreate,
@@ -46,9 +51,13 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
-@router.post("/auth/register", response_model=RegisterResponse)
-def register(user_create: UserCreate, db: Session = Depends(get_db)):
-    allowed_domains = [d.strip().lower() for d in settings.AUTHORIZED_EMAIL_DOMAINS.split(",") if d.strip()]
+@router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(RateLimiter(limit=5, window_seconds=60))])
+async def register(
+    user_create: UserCreate, 
+    db: Session = Depends(get_db), 
+    redis_client: aioredis.Redis = Depends(get_redis)
+):
+    allowed_domains = settings.authorized_email_domains_list
     email_domain = user_create.email.split("@")[-1].lower()
     if email_domain not in allowed_domains:
         raise HTTPException(
@@ -66,27 +75,28 @@ def register(user_create: UserCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
 
-    existing_pending = db.query(PendingRegistration).filter(PendingRegistration.email == user_create.email).first()
-    if existing_pending:
-        db.delete(existing_pending)
-        db.commit()
+    # Generate secure, unique pending ID and OTP code
+    pending_id = str(uuid.uuid4())
+    otp_code = email_verification.generate_otp_code()
 
     try:
         password_hash = security.get_password_hash(user_create.password)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    otp_code = email_verification.generate_otp_code()
+    # Delete any existing registration attempt for this email
+    old_pending_id = await redis_client.get(f"pending_email:{user_create.email}")
+    if old_pending_id:
+        await redis_client.delete(f"pending_registration:{old_pending_id}")
 
-    pending = PendingRegistration(
-        email=user_create.email,
-        password_hash=password_hash,
-        otp=otp_code,
-        otp_expires_at=datetime.utcnow() + timedelta(minutes=10),
-    )
-    db.add(pending)
-    db.commit()
-    db.refresh(pending)
+    # Set registration data in Redis (10-minute expiration)
+    pending_data = {
+        "email": user_create.email,
+        "password_hash": password_hash,
+        "otp": otp_code,
+    }
+    await redis_client.setex(f"pending_registration:{pending_id}", 600, json.dumps(pending_data))
+    await redis_client.setex(f"pending_email:{user_create.email}", 600, pending_id)
 
     subject = "Verify your College Connect email"
     html_body = (
@@ -102,56 +112,67 @@ def register(user_create: UserCreate, db: Session = Depends(get_db)):
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=pending.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    _send_email_or_dev_fallback(to_address=user_create.email, subject=subject, html_body=html_body, plain_body=plain_body)
 
-    return RegisterResponse(pending_id=pending.id, message="Registration initiated. Check your email for the verification code.")
+    return RegisterResponse(pending_id=pending_id, message="Registration initiated. Check your email for the verification code.")
 
 
-@router.post("/auth/verify-registration", response_model=Token)
-def verify_registration(payload: VerifyRegistrationRequest, db: Session = Depends(get_db)):
-    pending = db.query(PendingRegistration).filter(PendingRegistration.id == payload.pending_id).first()
-    if not pending:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found.")
+@router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(RateLimiter(limit=10, window_seconds=60))])
+async def verify_registration(
+    payload: VerifyRegistrationRequest, 
+    db: Session = Depends(get_db), 
+    redis_client: aioredis.Redis = Depends(get_redis)
+):
+    pending_key = f"pending_registration:{payload.pending_id}"
+    pending_data_str = await redis_client.get(pending_key)
+    if not pending_data_str:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found or expired.")
 
-    if pending.otp != payload.otp:
+    pending_data = json.loads(pending_data_str)
+
+    if pending_data["otp"] != payload.otp:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code.")
 
-    if datetime.utcnow() > pending.otp_expires_at:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification code expired.")
-
-    existing_user = db.query(User).filter(User.email == pending.email).first()
+    existing_user = db.query(User).filter(User.email == pending_data["email"]).first()
     if existing_user:
-        db.delete(pending)
-        db.commit()
+        await redis_client.delete(pending_key)
+        await redis_client.delete(f"pending_email:{pending_data['email']}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
 
     user = User(
-        email=pending.email,
-        password_hash=pending.password_hash,
+        email=pending_data["email"],
+        password_hash=pending_data["password_hash"],
         is_verified=True,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    db.delete(pending)
-    db.commit()
+    # Clean up Redis records
+    await redis_client.delete(pending_key)
+    await redis_client.delete(f"pending_email:{pending_data['email']}")
 
     access_token = security.create_access_token(subject=str(user.id))
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 
 
-@router.post("/auth/resend-otp")
-def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
-    pending = db.query(PendingRegistration).filter(PendingRegistration.id == payload.pending_id).first()
-    if not pending:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found.")
+@router.post("/auth/resend-otp", dependencies=[Depends(RateLimiter(limit=3, window_seconds=60))])
+async def resend_otp(
+    payload: ResendOtpRequest, 
+    redis_client: aioredis.Redis = Depends(get_redis)
+):
+    pending_key = f"pending_registration:{payload.pending_id}"
+    pending_data_str = await redis_client.get(pending_key)
+    if not pending_data_str:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found or expired.")
 
+    pending_data = json.loads(pending_data_str)
     new_otp = email_verification.generate_otp_code()
-    pending.otp = new_otp
-    pending.otp_expires_at = datetime.utcnow() + timedelta(minutes=10)
-    db.add(pending)
-    db.commit()
+    pending_data["otp"] = new_otp
+
+    # Store updated registration data and reset the TTL to 10 minutes
+    await redis_client.setex(pending_key, 600, json.dumps(pending_data))
+    await redis_client.expire(f"pending_email:{pending_data['email']}", 600)
 
     subject = "Verify your College Connect email"
     html_body = (
@@ -167,13 +188,16 @@ def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=pending.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    _send_email_or_dev_fallback(to_address=pending_data["email"], subject=subject, html_body=html_body, plain_body=plain_body)
 
     return {"message": "A new verification code has been sent to your email."}
 
 
-@router.post("/auth/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+@router.post("/auth/login", response_model=Token, dependencies=[Depends(RateLimiter(limit=5, window_seconds=60))])
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user or not security.verify_password(form_data.password, user.password_hash):
         raise HTTPException(
@@ -190,17 +214,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/auth/forgot-password")
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+@router.post("/auth/forgot-password", dependencies=[Depends(RateLimiter(limit=3, window_seconds=60))])
+async def forgot_password(
+    payload: ForgotPasswordRequest, 
+    db: Session = Depends(get_db), 
+    redis_client: aioredis.Redis = Depends(get_redis)
+):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     otp_code = email_verification.generate_otp_code()
-    user.reset_password_otp = otp_code
-    user.reset_password_otp_expires_at = datetime.utcnow() + timedelta(minutes=10)
-    db.add(user)
-    db.commit()
+    
+    # Store verification OTP in Redis instead of the database model
+    reset_key = f"reset_password_otp:{payload.email}"
+    await redis_client.setex(reset_key, 600, otp_code)
 
     subject = "Reset your College Connect password"
     html_body = (
@@ -221,17 +249,20 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
     return {"message": "Password reset code sent to your email."}
 
 
-@router.post("/auth/reset-password")
-def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+@router.post("/auth/reset-password", dependencies=[Depends(RateLimiter(limit=5, window_seconds=60))])
+async def reset_password(
+    payload: ResetPasswordRequest, 
+    db: Session = Depends(get_db), 
+    redis_client: aioredis.Redis = Depends(get_redis)
+):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
-    if not user.reset_password_otp or user.reset_password_otp != payload.otp:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reset code.")
-
-    if not user.reset_password_otp_expires_at or datetime.utcnow() > user.reset_password_otp_expires_at:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reset code expired.")
+    reset_key = f"reset_password_otp:{payload.email}"
+    stored_otp = await redis_client.get(reset_key)
+    if not stored_otp or stored_otp != payload.otp:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset code.")
 
     if len(payload.new_password.encode("utf-8")) > 72:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be 72 bytes or fewer.")
@@ -242,10 +273,14 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     user.password_hash = password_hash
+    # Clear legacy DB columns just in case
     user.reset_password_otp = None
     user.reset_password_otp_expires_at = None
     db.add(user)
     db.commit()
+
+    # Clear OTP from Redis cache
+    await redis_client.delete(reset_key)
 
     return {"message": "Password reset successfully."}
 

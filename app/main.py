@@ -17,9 +17,21 @@ except Exception:
     pass
 sync_auth_schema(engine)
 
+from contextlib import asynccontextmanager
+from app.core.redis import redis_service
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize connection client
+    redis_service.get_client()
+    yield
+    # Close connection client pool
+    await redis_service.close()
+
 app = FastAPI(
     title="College Connect API",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan
 )
 
 # ✅ Use env-based CORS (NOT "*")

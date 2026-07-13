@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     AZURE_KEY_VAULT_NAME: Optional[str] = Field(None, env="AZURE_KEY_VAULT_NAME")
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
     AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
+    REDIS_URL: str = Field("redis://localhost:6379/0", env="REDIS_URL")
+
 
     @property
     def authorized_email_domains_list(self) -> list[str]:
@@ -93,6 +95,9 @@ class Settings(BaseSettings):
                 ("APP_BASE_URL", "APP-BASE-URL"),
                 ("EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES", "EMAIL-VERIFICATION-TOKEN-EXPIRE-MINUTES"),
                 ("CORS_ORIGINS", "CORS-ORIGINS"),
+                ("REDIS_URL", "REDIS-URL"),
+                ("AZURE_STORAGE_CONNECTION_STRING", "storage-connection-string"),
+                ("AZURE_STORAGE_CONTAINER_NAME", "AZURE-STORAGE-CONTAINER-NAME"),
             ]
 
             for setting_name, key_vault_secret_name in secret_mappings:
@@ -100,15 +105,20 @@ class Settings(BaseSettings):
                     continue
 
                 if getattr(model, setting_name) is None or setting_name not in os.environ:
-                    secret = client.get_secret(key_vault_secret_name)
-                    secret_value = secret.value
-                    if setting_name in {
-                        "ACCESS_TOKEN_EXPIRE_MINUTES",
-                        "EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES",
-                    }:
-                        setattr(model, setting_name, int(secret_value))
-                    else:
-                        setattr(model, setting_name, secret_value)
+                    try:
+                        secret = client.get_secret(key_vault_secret_name)
+                        secret_value = secret.value
+                        if setting_name in {
+                            "ACCESS_TOKEN_EXPIRE_MINUTES",
+                            "EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES",
+                        }:
+                            setattr(model, setting_name, int(secret_value))
+                        else:
+                            setattr(model, setting_name, secret_value)
+                    except Exception as exc:
+                        if getattr(model, setting_name) is not None:
+                            continue
+                        raise exc
 
         if model.DATABASE_URL is None:
             model.DATABASE_URL = "sqlite:///./backend.db"

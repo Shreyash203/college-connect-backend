@@ -15,3 +15,5 @@ azure-identity
 azure-storage-blob
 azure-keyvault-secrets
 azure-communication-email
+redis
+
