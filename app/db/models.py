@@ -19,24 +19,10 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     is_verified = Column(Boolean, default=False)
-    verification_otp = Column(String(6), nullable=True)
-    verification_otp_expires_at = Column(DateTime, nullable=True)
-    reset_password_otp = Column(String(6), nullable=True)
-    reset_password_otp_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
-
-class PendingRegistration(Base):
-    __tablename__ = "pending_registrations"
-
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    otp = Column(String(6), nullable=False)
-    otp_expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class StudentProfile(Base):
