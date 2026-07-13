@@ -11,26 +11,52 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
+from app.schemas.marketplace import MarketplaceItemCreate
 
 router = APIRouter()
 
-def _upload_blob(file: UploadFile) -> str:
+@router.get("/marketplace/items/upload-url", response_model=dict)
+def get_marketplace_upload_url(
+    filename: str,
+    current_user: User = Depends(get_current_verified_user),
+):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
+    
+    parts = dict(item.split('=', 1) for item in settings.AZURE_STORAGE_CONNECTION_STRING.split(';') if item)
+    account_name = parts.get('AccountName')
+    account_key = parts.get('AccountKey')
+    if not account_name or not account_key:
+        raise HTTPException(status_code=500, detail="Invalid storage connection string.")
+
+    ext = Path(filename).suffix
+    blob_name = f"marketplace_images/{uuid.uuid4()}{ext}"
+    
+    # Ensure container exists and is publicly accessible
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
     try:
         container_client.create_container()
+        container_client.set_container_access_policy(public_access='blob')
     except Exception:
-        pass
-    ext = Path(file.filename).suffix
-    blob_name = f"marketplace_images/{uuid.uuid4()}{ext}"
-    container_client.upload_blob(blob_name, file.file, overwrite=True)
-    # SAS token for private storage
-    parts = dict(item.split('=', 1) for item in settings.AZURE_STORAGE_CONNECTION_STRING.split(';') if item)
-    account_name = parts.get('AccountName')
-    account_key = parts.get('AccountKey')
-    sas_token = generate_blob_sas(
+        try:
+            container_client.set_container_access_policy(public_access='blob')
+        except Exception:
+            pass
+
+    # Generate upload SAS token with WRITE and CREATE permissions
+    upload_sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(write=True, create=True),
+        expiry=datetime.utcnow() + timedelta(hours=1),
+    )
+    upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
+    
+    # Generate read-only SAS token for viewing
+    read_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
         blob_name=blob_name,
@@ -38,22 +64,21 @@ def _upload_blob(file: UploadFile) -> str:
         permission=BlobSasPermissions(read=True),
         expiry=datetime.utcnow() + timedelta(days=30),
     )
-    return f"{container_client.url}/{blob_name}?{sas_token}"
+    image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
+    
+    return {"upload_url": upload_url, "image_url": image_url}
 
 @router.post("/marketplace/items", response_model=dict)
 def create_marketplace_item(
-    title: str = Form(...),
-    description: str = Form(None),
-    file: UploadFile = File(...),
+    item_in: MarketplaceItemCreate,
     current_user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    image_url = _upload_blob(file)
     item = MarketplaceItem(
         user_id=current_user.id,
-        title=title,
-        description=description,
-        image_url=image_url,
+        title=item_in.title,
+        description=item_in.description,
+        image_url=item_in.image_url,
     )
     db.add(item)
     db.commit()

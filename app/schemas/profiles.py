@@ -20,3 +20,8 @@ class ProfileRead(BaseModel):
     year: Optional[str]
     bio: Optional[str]
     interests: List[str]
+
+
+class ImageUpdate(BaseModel):
+    image_url: str
+
