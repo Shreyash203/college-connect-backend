@@ -12,10 +12,7 @@ def sync_auth_schema(engine: Engine) -> None:
         return
 
     existing_columns = {column["name"] for column in inspector.get_columns(User.__tablename__)}
-    missing_columns = [
-        User.__table__.c.reset_password_otp,
-        User.__table__.c.reset_password_otp_expires_at,
-    ]
+    missing_columns = []
 
     for column in missing_columns:
         if column.name in existing_columns:
