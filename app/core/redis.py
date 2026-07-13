@@ -8,7 +8,8 @@ class RedisService:
     def get_client(self) -> aioredis.Redis:
         if self.client is None:
             # decode_responses=True parses standard Redis bytes into Python strings automatically
-            self.client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            # max_connections=20 prevents exceeding the free tier limit on Redis Cloud (typically 30)
+            self.client = aioredis.from_url(settings.REDIS_URL, decode_responses=True, max_connections=20)
         return self.client
 
     async def close(self):
