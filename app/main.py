@@ -15,6 +15,12 @@ try:
 except Exception:
     # Column may already exist; ignore any errors
     pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute("ALTER TABLE marketplace_items ADD COLUMN image_url VARCHAR(255) NULL;")
+except Exception:
+    pass
 sync_auth_schema(engine)
 
 from contextlib import asynccontextmanager
