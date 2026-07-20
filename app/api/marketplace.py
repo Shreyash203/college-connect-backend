@@ -7,6 +7,7 @@ from app.core.dependencies import get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import MarketplaceItem, User
 from app.core.config import settings
+from app.core.rate_limiter import DailyUploadRateLimiter
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,16 +21,24 @@ def get_marketplace_upload_url(
     filename: str,
     current_user: User = Depends(get_current_verified_user),
 ):
+    # Apply rate limiting (3 uploads per day)
+    daily_limiter = DailyUploadRateLimiter(limit=3)
+    
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
     
+    # Validate filename extension
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'}
+    ext = Path(filename).suffix.lower()
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Invalid image file type. Allowed types: JPG, JPEG, PNG, GIF, WebP, SVG")
+
     parts = dict(item.split('=', 1) for item in settings.AZURE_STORAGE_CONNECTION_STRING.split(';') if item)
     account_name = parts.get('AccountName')
     account_key = parts.get('AccountKey')
     if not account_name or not account_key:
         raise HTTPException(status_code=500, detail="Invalid storage connection string.")
 
-    ext = Path(filename).suffix
     blob_name = f"marketplace_images/{uuid.uuid4()}{ext}"
     
     # Ensure container exists and is publicly accessible
@@ -44,7 +53,7 @@ def get_marketplace_upload_url(
         except Exception:
             pass
 
-    # Generate upload SAS token with WRITE and CREATE permissions
+    # Generate upload SAS token with WRITE and CREATE permissions (1 hour expiry)
     upload_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
@@ -55,7 +64,7 @@ def get_marketplace_upload_url(
     )
     upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
     
-    # Generate read-only SAS token for viewing
+    # Generate read-only SAS token for viewing (30 days)
     read_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,

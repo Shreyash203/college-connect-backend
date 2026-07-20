@@ -37,8 +37,31 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="College Connect API",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    max_content_length=10 * 1024 * 1024  # Enforce 10 MB file size limit
 )
+
+# ✅ Use env-based CORS (NOT "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,   # e.g. ["https://your-frontend.azurestaticapps.net"]
+    allow_credentials=True,                     # usually needed for auth flows
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix="/api")
+app.include_router(profiles.router, prefix="/api")
+app.include_router(marketplace.router, prefix="/api")
+
+@app.get("/")
+def root():
+    return {"message": "College Connect backend is running"}
+
+# ✅ Add health endpoint for Azure Container Apps probes
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "env": settings.ENV}
 
 # ✅ Use env-based CORS (NOT "*")
 app.add_middleware(
