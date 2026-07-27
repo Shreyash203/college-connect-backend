@@ -146,8 +146,8 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/profiles", response_model=List[ProfileRead])
-def list_profiles(db: Session = Depends(get_db)):
-    profiles = db.query(StudentProfile).all()
+def list_profiles(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+    profiles = db.query(StudentProfile).order_by(StudentProfile.created_at.desc()).offset(skip).limit(limit).all()
     return [profile_to_response(profile) for profile in profiles]
 
 

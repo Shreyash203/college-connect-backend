@@ -24,7 +24,6 @@ class User(Base):
     profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
 
-
 class StudentProfile(Base):
     image_url = Column(String, nullable=True)  # URL to Azure Blob image
     __tablename__ = "student_profiles"
@@ -60,3 +59,41 @@ class MarketplaceItem(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="marketplace_items")
+
+
+class Confession(Base):
+    __tablename__ = "confessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    college_domain = Column(String(255), nullable=False)
+    content = Column(String(1000), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", backref="confessions")
+
+
+class StudentApp(Base):
+    __tablename__ = "student_apps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    app_name = Column(String(255), nullable=False)
+    description = Column(String(1000), nullable=False)
+    app_url = Column(String(255), nullable=True)
+    college_domain = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", backref="student_apps")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    message = Column(String(1000), nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="notifications")

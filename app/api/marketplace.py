@@ -100,8 +100,8 @@ def create_marketplace_item(
     }
 
 @router.get("/marketplace/items", response_model=List[dict])
-def list_marketplace_items(db: Session = Depends(get_db)):
-    items = db.query(MarketplaceItem).order_by(MarketplaceItem.created_at.desc()).all()
+def list_marketplace_items(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+    items = db.query(MarketplaceItem).order_by(MarketplaceItem.created_at.desc()).offset(skip).limit(limit).all()
     return [
         {
             "id": i.id,
