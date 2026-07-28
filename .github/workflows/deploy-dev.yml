@@ -62,4 +62,4 @@ jobs:
             -n ca-college-connect-api \
             -g rg-college-connect-dev \
             --image $IMAGE_REPOSITORY:${{ github.sha }} \
-            --set-env-vars "ADMIN_EMAILS=shreyashbhanage@gmail.com"
+            --set-env-vars "ADMIN_EMAILS=shreyash.santosh.bhanage@gmail.com"
