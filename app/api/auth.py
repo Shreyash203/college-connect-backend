@@ -218,22 +218,32 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+import requests as http_requests
+
 @router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=10, window_seconds=60))])
 async def google_login(
     payload: GoogleLoginRequest, 
     db: Session = Depends(get_db)
 ):
+    id_info = None
     try:
         id_info = google_id_token.verify_oauth2_token(
             payload.credential, 
             google_requests.Request(), 
             settings.GOOGLE_CLIENT_ID
         )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid Google token: {str(exc)}"
-        )
+    except Exception:
+        try:
+            resp = http_requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={payload.credential}", timeout=5)
+            if resp.status_code == 200:
+                id_info = resp.json()
+            else:
+                raise Exception(resp.text)
+        except Exception as fallback_exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid Google token: {str(fallback_exc)}"
+            )
 
     email = id_info.get("email")
     if not email:
