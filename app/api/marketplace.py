@@ -61,13 +61,21 @@ def get_marketplace_upload_url(
     )
     upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
     
-    # The container is public, so we don't need an expiring read SAS token.
-    image_url = f"{container_client.url}/{blob_name}"
+    # Generate read-only SAS token for viewing (30 days) to bypass any strict Azure public access blocks
+    read_sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(days=36500), # 100 years to prevent expiration
+    )
+    image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
     
     return {"upload_url": upload_url, "image_url": image_url}
 
 @router.post("/marketplace/items", response_model=dict)
-def create_marketplace_item(
+async def create_marketplace_item(
     item_in: MarketplaceItemCreate,
     current_user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
@@ -81,6 +89,15 @@ def create_marketplace_item(
     db.add(item)
     db.commit()
     db.refresh(item)
+    
+    redis = redis_service.get_client()
+    try:
+        keys = await redis.keys("cache:marketplace:*")
+        if keys:
+            await redis.delete(*keys)
+    except Exception:
+        pass
+    
     return {
         "id": item.id,
         "title": item.title,
@@ -154,7 +171,7 @@ async def list_marketplace_items(
     return results
 
 @router.delete("/marketplace/items/{item_id}", status_code=204)
-def delete_marketplace_item(
+async def delete_marketplace_item(
     item_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
@@ -167,4 +184,13 @@ def delete_marketplace_item(
     
     db.delete(item)
     db.commit()
+    
+    redis = redis_service.get_client()
+    try:
+        keys = await redis.keys("cache:marketplace:*")
+        if keys:
+            await redis.delete(*keys)
+    except Exception:
+        pass
+    
     return
