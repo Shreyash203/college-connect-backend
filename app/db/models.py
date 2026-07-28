@@ -21,6 +21,11 @@ class User(Base):
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    @property
+    def is_admin(self) -> bool:
+        from app.core.config import settings
+        return self.email.lower() in settings.admin_emails_list
+
     profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
 

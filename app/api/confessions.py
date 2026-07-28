@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.rate_limiter import SlidingWindowRateLimiter
+from fastapi.concurrency import run_in_threadpool
+from app.core.redis import redis_service
+import json
 
 from app.core.dependencies import get_db
 from app.db.models import User, Confession
@@ -38,32 +41,66 @@ def create_confession(
     )
 
 @router.get("/", response_model=List[ConfessionRead])
-def get_all_confessions(
+async def get_all_confessions(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
+    cache_key = f"cache:confessions:{skip}:{limit}"
+    redis = redis_service.get_client()
+    
+    try:
+        cached_data = await redis.get(cache_key)
+        if cached_data:
+            posts = json.loads(cached_data)
+            for post in posts:
+                post["is_mine"] = (post["user_id"] == current_user.id) or current_user.is_admin
+            return posts
+    except Exception:
+        pass
+
     # Auto-expiry: 48 hours cutoff
     cutoff = datetime.utcnow() - timedelta(hours=48)
-    confessions = (
-        db.query(Confession)
-        .filter(Confession.created_at >= cutoff)
-        .order_by(Confession.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    
+    def fetch_confessions():
+        return (
+            db.query(Confession)
+            .filter(Confession.created_at >= cutoff)
+            .order_by(Confession.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        
+    confessions = await run_in_threadpool(fetch_confessions)
     
     results = []
+    cache_payload = []
     for c in confessions:
+        # For cache
+        cache_payload.append({
+            "id": c.id,
+            "user_id": c.user_id,
+            "college_domain": c.college_domain,
+            "content": c.content,
+            "created_at": c.created_at.isoformat()
+        })
+        
+        # For actual response
         results.append(ConfessionRead(
             id=c.id,
             college_domain=c.college_domain,
             content=c.content,
             created_at=c.created_at,
-            is_mine=(c.user_id == current_user.id)
+            is_mine=(c.user_id == current_user.id) or current_user.is_admin
         ))
+        
+    try:
+        await redis.setex(cache_key, 30, json.dumps(cache_payload))
+    except Exception:
+        pass
+        
     return results
 
 @router.delete("/{confession_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -76,7 +113,7 @@ def delete_confession(
     if not confession:
         raise HTTPException(status_code=404, detail="Confession not found")
         
-    if confession.user_id != current_user.id:
+    if confession.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this confession")
         
     db.delete(confession)

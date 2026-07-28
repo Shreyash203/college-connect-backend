@@ -46,11 +46,16 @@ class Settings(BaseSettings):
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
     AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
     REDIS_URL: str = Field("redis://localhost:6379/0", env="REDIS_URL")
+    ADMIN_EMAILS: str = Field("shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
 
 
     @property
     def authorized_email_domains_list(self) -> list[str]:
         return [d.strip().lower() for d in self.AUTHORIZED_EMAIL_DOMAINS.split(",") if d.strip()]
+
+    @property
+    def admin_emails_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",") if e.strip()]
 
     @property
     def cors_origins_list(self) -> list[str]:

@@ -8,6 +8,9 @@ from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import MarketplaceItem, User
 from app.core.config import settings
 from app.core.rate_limiter import DailyUploadRateLimiter
+from fastapi.concurrency import run_in_threadpool
+from app.core.redis import redis_service
+import json
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -102,33 +105,67 @@ def create_marketplace_item(
     }
 
 @router.get("/marketplace/items", response_model=List[dict])
-def list_marketplace_items(
+async def list_marketplace_items(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
+    cache_key = f"cache:marketplace:{skip}:{limit}"
+    redis = redis_service.get_client()
+    
+    try:
+        cached_data = await redis.get(cache_key)
+        if cached_data:
+            items = json.loads(cached_data)
+            for item in items:
+                item["is_mine"] = (item["user_id"] == current_user.id) or current_user.is_admin
+            return items
+    except Exception:
+        pass
+
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
-    items = (
-        db.query(MarketplaceItem)
-        .filter(MarketplaceItem.created_at >= cutoff)
-        .order_by(MarketplaceItem.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
-    return [
-        {
+    
+    def fetch_items():
+        return (
+            db.query(MarketplaceItem)
+            .filter(MarketplaceItem.created_at >= cutoff)
+            .order_by(MarketplaceItem.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        
+    items = await run_in_threadpool(fetch_items)
+    
+    results = []
+    cache_payload = []
+    
+    for i in items:
+        cache_payload.append({
+            "id": i.id,
+            "title": i.title,
+            "description": i.description,
+            "image_url": i.image_url,
+            "user_id": i.user_id
+        })
+        
+        results.append({
             "id": i.id,
             "title": i.title,
             "description": i.description,
             "image_url": i.image_url,
             "user_id": i.user_id,
-            "is_mine": (i.user_id == current_user.id)
-        }
-        for i in items
-    ]
+            "is_mine": (i.user_id == current_user.id) or current_user.is_admin
+        })
+        
+    try:
+        await redis.setex(cache_key, 30, json.dumps(cache_payload))
+    except Exception:
+        pass
+        
+    return results
 
 @router.delete("/marketplace/items/{item_id}", status_code=204)
 def delete_marketplace_item(
@@ -139,7 +176,7 @@ def delete_marketplace_item(
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Marketplace item not found")
-    if item.user_id != current_user.id:
+    if item.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this item")
     
     db.delete(item)

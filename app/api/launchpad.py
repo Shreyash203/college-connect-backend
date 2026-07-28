@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.rate_limiter import SlidingWindowRateLimiter
+from fastapi.concurrency import run_in_threadpool
+from app.core.redis import redis_service
+import json
 
 from app.core.dependencies import get_db
 from app.db.models import User, StudentApp
@@ -50,24 +53,53 @@ def create_app(
     )
 
 @router.get("/", response_model=List[StudentAppRead])
-def get_all_apps(
+async def get_all_apps(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
+    cache_key = f"cache:launchpad:{skip}:{limit}"
+    redis = redis_service.get_client()
+    
+    try:
+        cached_data = await redis.get(cache_key)
+        if cached_data:
+            apps = json.loads(cached_data)
+            for app in apps:
+                app["is_mine"] = (app["user_id"] == current_user.id) or current_user.is_admin
+            return apps
+    except Exception:
+        pass
+
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
-    apps = (
-        db.query(StudentApp)
-        .filter(StudentApp.created_at >= cutoff)
-        .order_by(StudentApp.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    
+    def fetch_apps():
+        return (
+            db.query(StudentApp)
+            .filter(StudentApp.created_at >= cutoff)
+            .order_by(StudentApp.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+        
+    apps = await run_in_threadpool(fetch_apps)
+    
     results = []
+    cache_payload = []
     for a in apps:
+        cache_payload.append({
+            "id": a.id,
+            "user_id": a.user_id,
+            "app_name": a.app_name,
+            "description": a.description,
+            "app_url": a.app_url,
+            "college_domain": a.college_domain,
+            "created_at": a.created_at.isoformat()
+        })
+        
         results.append(StudentAppRead(
             id=a.id,
             app_name=a.app_name,
@@ -76,8 +108,14 @@ def get_all_apps(
             college_domain=a.college_domain,
             created_at=a.created_at,
             user_id=a.user_id,
-            is_mine=(a.user_id == current_user.id)
+            is_mine=(a.user_id == current_user.id) or current_user.is_admin
         ))
+        
+    try:
+        await redis.setex(cache_key, 30, json.dumps(cache_payload))
+    except Exception:
+        pass
+        
     return results
 
 @router.delete("/{app_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -90,7 +128,7 @@ def delete_app(
     if not student_app:
         raise HTTPException(status_code=404, detail="App not found")
         
-    if student_app.user_id != current_user.id:
+    if student_app.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this app")
         
     db.delete(student_app)

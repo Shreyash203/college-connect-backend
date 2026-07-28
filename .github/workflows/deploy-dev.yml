@@ -61,4 +61,5 @@ jobs:
           az containerapp update \
             -n ca-college-connect-api \
             -g rg-college-connect-dev \
-            --image $IMAGE_REPOSITORY:${{ github.sha }}
+            --image $IMAGE_REPOSITORY:${{ github.sha }} \
+            --set-env-vars "ADMIN_EMAILS=shreyashbhanage@gmail.com"
