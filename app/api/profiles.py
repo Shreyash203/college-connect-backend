@@ -178,14 +178,8 @@ def get_profile_upload_url(
     
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
-    try:
-        container_client.create_container()
-        container_client.set_container_access_policy(public_access='blob')
-    except Exception:
-        try:
-            container_client.set_container_access_policy(public_access='blob')
-        except Exception:
-            pass
+    # We assume the container already exists and has the correct access policy.
+    # Calling create_container() on every upload causes severe latency and potential timeouts.
 
     # Generate upload SAS token with WRITE and CREATE permissions (1 hour expiry)
     upload_sas_token = generate_blob_sas(

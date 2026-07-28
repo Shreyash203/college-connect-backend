@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from app.core.redis import redis_service
 from app.db.session import SessionLocal
-from app.db.models import Confession
+from app.db.models import Confession, MarketplaceItem
 
 async def purge_expired_confessions_loop():
     while True:
@@ -36,12 +36,18 @@ async def purge_expired_confessions_loop():
             db = SessionLocal()
             cutoff = datetime.utcnow() - timedelta(hours=48)
             deleted_count = db.query(Confession).filter(Confession.created_at < cutoff).delete()
+            
+            bazaar_cutoff = datetime.utcnow() - timedelta(days=14)
+            bazaar_deleted_count = db.query(MarketplaceItem).filter(MarketplaceItem.created_at < bazaar_cutoff).delete()
+            
             db.commit()
             db.close()
             if deleted_count > 0:
                 print(f"[Purge Task] Erased {deleted_count} expired confessions from DB disk storage.")
+            if bazaar_deleted_count > 0:
+                print(f"[Purge Task] Erased {bazaar_deleted_count} expired bazaar items from DB.")
         except Exception as e:
-            print(f"[Purge Task] Error during confession purge: {e}")
+            print(f"[Purge Task] Error during background purge: {e}")
         await asyncio.sleep(12 * 3600)
 
 @asynccontextmanager
