@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
 
     AUTHORIZED_EMAIL_DOMAINS: str = Field("iith.ac.in,gmail.com", env="AUTHORIZED_EMAIL_DOMAINS")
+    GOOGLE_CLIENT_ID: str = Field("774747436427-57ign6kn9qt9tat4ipq7cnb04hio3rmn.apps.googleusercontent.com", env="GOOGLE_CLIENT_ID")
 
     EMAIL_PROVIDER: str = Field("acs", env="EMAIL_PROVIDER")
     EMAIL_FROM: Optional[str] = Field(None, env="EMAIL_FROM")

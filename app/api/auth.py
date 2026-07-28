@@ -12,6 +12,9 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.db.models import User, StudentProfile, profile_interests
 from app.core.redis import get_redis
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+
 from app.core.rate_limiter import SlidingWindowRateLimiter, DailyUploadRateLimiter
 from app.schemas.auth import (
     DeleteUserRequest,
@@ -22,6 +25,7 @@ from app.schemas.auth import (
     ResendOtpRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    GoogleLoginRequest,
 )
 
 router = APIRouter()
@@ -212,6 +216,56 @@ async def login(
         )
     access_token = security.create_access_token(subject=str(user.id), expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=10, window_seconds=60))])
+async def google_login(
+    payload: GoogleLoginRequest, 
+    db: Session = Depends(get_db)
+):
+    try:
+        id_info = google_id_token.verify_oauth2_token(
+            payload.credential, 
+            google_requests.Request(), 
+            settings.GOOGLE_CLIENT_ID
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid Google token: {str(exc)}"
+        )
+
+    email = id_info.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
+
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    allowed_domains = settings.authorized_email_domains_list
+    if allowed_domains and domain not in allowed_domains:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+        )
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(
+            email=email,
+            password_hash=security.get_password_hash(uuid.uuid4().hex),
+            is_verified=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.is_verified:
+        user.is_verified = True
+        db.commit()
+
+    access_token = security.create_access_token(
+        subject=str(user.id), 
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 
 
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=3, window_seconds=60))])
