@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 router = APIRouter(prefix="/confessions", tags=["Confessions"])
 
 @router.post("/", response_model=ConfessionRead, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=3600))])
-def create_confession(
+async def create_confession(
     confession_in: ConfessionCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
@@ -31,6 +31,15 @@ def create_confession(
     db.add(new_confession)
     db.commit()
     db.refresh(new_confession)
+    
+    # Invalidate cache so the new post appears instantly
+    redis = redis_service.get_client()
+    try:
+        keys = await redis.keys("cache:confessions:*")
+        if keys:
+            await redis.delete(*keys)
+    except Exception:
+        pass
     
     return ConfessionRead(
         id=new_confession.id,
@@ -104,7 +113,7 @@ async def get_all_confessions(
     return results
 
 @router.delete("/{confession_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_confession(
+async def delete_confession(
     confession_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
@@ -118,3 +127,12 @@ def delete_confession(
         
     db.delete(confession)
     db.commit()
+    
+    # Invalidate cache so the deleted post disappears instantly
+    redis = redis_service.get_client()
+    try:
+        keys = await redis.keys("cache:confessions:*")
+        if keys:
+            await redis.delete(*keys)
+    except Exception:
+        pass

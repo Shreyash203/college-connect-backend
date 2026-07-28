@@ -61,16 +61,8 @@ def get_marketplace_upload_url(
     )
     upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
     
-    # Generate read-only SAS token for viewing (30 days)
-    read_sas_token = generate_blob_sas(
-        account_name=account_name,
-        container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
-        blob_name=blob_name,
-        account_key=account_key,
-        permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(days=30),
-    )
-    image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
+    # The container is public, so we don't need an expiring read SAS token.
+    image_url = f"{container_client.url}/{blob_name}"
     
     return {"upload_url": upload_url, "image_url": image_url}
 
