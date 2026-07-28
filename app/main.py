@@ -23,14 +23,34 @@ except Exception:
     pass
 sync_auth_schema(engine)
 
+import asyncio
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from app.core.redis import redis_service
+from app.db.session import SessionLocal
+from app.db.models import Confession
+
+async def purge_expired_confessions_loop():
+    while True:
+        try:
+            db = SessionLocal()
+            cutoff = datetime.utcnow() - timedelta(hours=48)
+            deleted_count = db.query(Confession).filter(Confession.created_at < cutoff).delete()
+            db.commit()
+            db.close()
+            if deleted_count > 0:
+                print(f"[Purge Task] Erased {deleted_count} expired confessions from DB disk storage.")
+        except Exception as e:
+            print(f"[Purge Task] Error during confession purge: {e}")
+        await asyncio.sleep(12 * 3600)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize connection client
     redis_service.get_client()
+    purge_task = asyncio.create_task(purge_expired_confessions_loop())
     yield
+    purge_task.cancel()
     # Close connection client pool
     await redis_service.close()
 

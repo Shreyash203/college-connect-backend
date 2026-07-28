@@ -8,6 +8,8 @@ from app.db.models import User, Confession
 from app.schemas.intercollege import ConfessionCreate, ConfessionRead
 from app.core.verified_dependencies import get_current_verified_user
 
+from datetime import datetime, timedelta
+
 router = APIRouter(prefix="/confessions", tags=["Confessions"])
 
 @router.post("/", response_model=ConfessionRead, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=3600))])
@@ -42,8 +44,16 @@ def get_all_confessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
-    # Fetch all confessions globally (inter-college)
-    confessions = db.query(Confession).order_by(Confession.created_at.desc()).offset(skip).limit(limit).all()
+    # Auto-expiry: 48 hours cutoff
+    cutoff = datetime.utcnow() - timedelta(hours=48)
+    confessions = (
+        db.query(Confession)
+        .filter(Confession.created_at >= cutoff)
+        .order_by(Confession.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     
     results = []
     for c in confessions:

@@ -97,17 +97,51 @@ def create_marketplace_item(
         "title": item.title,
         "description": item.description,
         "image_url": item.image_url,
+        "user_id": item.user_id,
+        "is_mine": True
     }
 
 @router.get("/marketplace/items", response_model=List[dict])
-def list_marketplace_items(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
-    items = db.query(MarketplaceItem).order_by(MarketplaceItem.created_at.desc()).offset(skip).limit(limit).all()
+def list_marketplace_items(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    # Auto-expiry: 14 days cutoff
+    cutoff = datetime.utcnow() - timedelta(days=14)
+    items = (
+        db.query(MarketplaceItem)
+        .filter(MarketplaceItem.created_at >= cutoff)
+        .order_by(MarketplaceItem.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return [
         {
             "id": i.id,
             "title": i.title,
             "description": i.description,
             "image_url": i.image_url,
+            "user_id": i.user_id,
+            "is_mine": (i.user_id == current_user.id)
         }
         for i in items
     ]
+
+@router.delete("/marketplace/items/{item_id}", status_code=204)
+def delete_marketplace_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Marketplace item not found")
+    if item.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this item")
+    
+    db.delete(item)
+    db.commit()
+    return
