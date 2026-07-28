@@ -76,6 +76,7 @@ def create_profile(
         department=profile_in.department,
         year=profile_in.year,
         bio=profile_in.bio,
+        image_url=profile_in.image_url,
     )
     db.add(profile)
     db.commit()
@@ -112,6 +113,8 @@ def update_profile(
     profile.department = profile_in.department
     profile.year = profile_in.year
     profile.bio = profile_in.bio
+    if profile_in.image_url:
+        profile.image_url = profile_in.image_url
 
     # Update interests
     new_interests = []

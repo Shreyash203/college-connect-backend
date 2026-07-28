@@ -9,6 +9,7 @@ class ProfileCreate(BaseModel):
     year: Optional[str]
     bio: Optional[str]
     interests: List[str]
+    image_url: Optional[str] = None
 
 
 class ProfileRead(BaseModel):
