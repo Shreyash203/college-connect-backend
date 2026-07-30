@@ -66,6 +66,12 @@ class MarketplaceItem(Base):
     user = relationship("User", backref="marketplace_items")
 
 
+class MarketplaceInterest(Base):
+    __tablename__ = "marketplace_interests"
+
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    item_id = Column(Integer, ForeignKey("marketplace_items.id"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 class Confession(Base):
     __tablename__ = "confessions"
 
@@ -78,6 +84,12 @@ class Confession(Base):
     user = relationship("User", backref="confessions")
 
 
+class ConfessionLike(Base):
+    __tablename__ = "confession_likes"
+
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    confession_id = Column(Integer, ForeignKey("confessions.id"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 class StudentApp(Base):
     __tablename__ = "student_apps"
 

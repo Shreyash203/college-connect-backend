@@ -7,7 +7,7 @@ from app.core.redis import redis_service
 import json
 
 from app.core.dependencies import get_db
-from app.db.models import User, Confession
+from app.db.models import User, Confession, ConfessionLike
 from app.schemas.intercollege import ConfessionCreate, ConfessionRead
 from app.core.verified_dependencies import get_current_verified_user
 
@@ -56,24 +56,11 @@ async def get_all_confessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
-    cache_key = f"cache:confessions:{skip}:{limit}"
-    redis = redis_service.get_client()
-    
-    try:
-        cached_data = await redis.get(cache_key)
-        if cached_data:
-            posts = json.loads(cached_data)
-            for post in posts:
-                post["is_mine"] = (post["user_id"] == current_user.id) or current_user.is_admin
-            return posts
-    except Exception:
-        pass
-
     # Auto-expiry: 48 hours cutoff
     cutoff = datetime.utcnow() - timedelta(hours=48)
     
     def fetch_confessions():
-        return (
+        confessions = (
             db.query(Confession)
             .filter(Confession.created_at >= cutoff)
             .order_by(Confession.created_at.desc())
@@ -81,36 +68,62 @@ async def get_all_confessions(
             .limit(limit)
             .all()
         )
+        if not confessions:
+            return []
+            
+        confession_ids = [c.id for c in confessions]
+        likes = db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(confession_ids)).all()
         
-    confessions = await run_in_threadpool(fetch_confessions)
+        # Build map of confession_id -> list of user_ids who liked it
+        likes_map = {cid: [] for cid in confession_ids}
+        for like in likes:
+            likes_map[like.confession_id].append(like.user_id)
+            
+        return [(c, likes_map[c.id]) for c in confessions]
+        
+    data = await run_in_threadpool(fetch_confessions)
     
     results = []
-    cache_payload = []
-    for c in confessions:
-        # For cache
-        cache_payload.append({
-            "id": c.id,
-            "user_id": c.user_id,
-            "college_domain": c.college_domain,
-            "content": c.content,
-            "created_at": c.created_at.isoformat()
-        })
-        
-        # For actual response
+    for c, liked_by_users in data:
         results.append(ConfessionRead(
             id=c.id,
             college_domain=c.college_domain,
             content=c.content,
             created_at=c.created_at,
-            is_mine=(c.user_id == current_user.id) or current_user.is_admin
+            is_mine=(c.user_id == current_user.id) or current_user.is_admin,
+            likes_count=len(liked_by_users),
+            has_liked=current_user.id in liked_by_users
         ))
         
-    try:
-        await redis.setex(cache_key, 30, json.dumps(cache_payload))
-    except Exception:
-        pass
-        
     return results
+
+@router.post("/{confession_id}/like")
+async def toggle_like(
+    confession_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    confession = db.query(Confession).filter(Confession.id == confession_id).first()
+    if not confession:
+        raise HTTPException(status_code=404, detail="Confession not found")
+        
+    existing_like = db.query(ConfessionLike).filter(
+        ConfessionLike.confession_id == confession_id,
+        ConfessionLike.user_id == current_user.id
+    ).first()
+    
+    if existing_like:
+        db.delete(existing_like)
+        liked = False
+    else:
+        new_like = ConfessionLike(user_id=current_user.id, confession_id=confession_id)
+        db.add(new_like)
+        liked = True
+        
+    db.commit()
+    
+    likes_count = db.query(ConfessionLike).filter(ConfessionLike.confession_id == confession_id).count()
+    return {"liked": liked, "likes_count": likes_count}
 
 @router.delete("/{confession_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_confession(

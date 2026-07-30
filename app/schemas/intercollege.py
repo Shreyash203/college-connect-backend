@@ -13,6 +13,8 @@ class ConfessionRead(BaseModel):
     content: str
     created_at: datetime
     is_mine: bool = False
+    likes_count: int = 0
+    has_liked: bool = False
 
     class Config:
         from_attributes = True

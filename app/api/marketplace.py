@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
 from app.core.verified_dependencies import get_current_verified_user
-from app.db.models import MarketplaceItem, User
+from app.db.models import MarketplaceItem, User, MarketplaceInterest
 from app.core.config import settings
 from app.core.rate_limiter import DailyUploadRateLimiter
 from fastapi.concurrency import run_in_threadpool
@@ -114,24 +114,11 @@ async def list_marketplace_items(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
-    cache_key = f"cache:marketplace:{skip}:{limit}"
-    redis = redis_service.get_client()
-    
-    try:
-        cached_data = await redis.get(cache_key)
-        if cached_data:
-            items = json.loads(cached_data)
-            for item in items:
-                item["is_mine"] = (item["user_id"] == current_user.id) or current_user.is_admin
-            return items
-    except Exception:
-        pass
-
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
     
     def fetch_items():
-        return (
+        items = (
             db.query(MarketplaceItem)
             .filter(MarketplaceItem.created_at >= cutoff)
             .order_by(MarketplaceItem.created_at.desc())
@@ -139,36 +126,62 @@ async def list_marketplace_items(
             .limit(limit)
             .all()
         )
+        if not items:
+            return []
+            
+        item_ids = [i.id for i in items]
+        interests = db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(item_ids)).all()
         
-    items = await run_in_threadpool(fetch_items)
+        interest_map = {iid: [] for iid in item_ids}
+        for interest in interests:
+            interest_map[interest.item_id].append(interest.user_id)
+            
+        return [(i, interest_map[i.id]) for i in items]
+        
+    data = await run_in_threadpool(fetch_items)
     
     results = []
-    cache_payload = []
-    
-    for i in items:
-        cache_payload.append({
-            "id": i.id,
-            "title": i.title,
-            "description": i.description,
-            "image_url": i.image_url,
-            "user_id": i.user_id
-        })
-        
+    for i, interested_users in data:
         results.append({
             "id": i.id,
             "title": i.title,
             "description": i.description,
             "image_url": i.image_url,
             "user_id": i.user_id,
-            "is_mine": (i.user_id == current_user.id) or current_user.is_admin
+            "is_mine": (i.user_id == current_user.id) or current_user.is_admin,
+            "interest_count": len(interested_users),
+            "has_indicated_interest": current_user.id in interested_users
         })
         
-    try:
-        await redis.setex(cache_key, 30, json.dumps(cache_payload))
-    except Exception:
-        pass
-        
     return results
+
+@router.post("/marketplace/items/{item_id}/interest")
+async def toggle_interest(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+        
+    existing = db.query(MarketplaceInterest).filter(
+        MarketplaceInterest.item_id == item_id,
+        MarketplaceInterest.user_id == current_user.id
+    ).first()
+    
+    if existing:
+        db.delete(existing)
+        interested = False
+    else:
+        new_interest = MarketplaceInterest(user_id=current_user.id, item_id=item_id)
+        db.add(new_interest)
+        interested = True
+        
+    db.commit()
+    
+    interest_count = db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id == item_id).count()
+    return {"interested": interested, "interest_count": interest_count}
 
 @router.delete("/marketplace/items/{item_id}", status_code=204)
 async def delete_marketplace_item(
