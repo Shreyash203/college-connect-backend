@@ -11,12 +11,19 @@ profile_interests = Table(
     Column("interest_id", ForeignKey("interests.id"), primary_key=True),
 )
 
+class AuthorizedDomain(Base):
+    __tablename__ = "authorized_domains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    domain = Column(String(255), unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
+    college_domain = Column(String(255), index=True, nullable=True) # Indexed for fast silo queries
     password_hash = Column(String(255), nullable=False)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -69,8 +76,8 @@ class MarketplaceItem(Base):
 class MarketplaceInterest(Base):
     __tablename__ = "marketplace_interests"
 
-    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    item_id = Column(Integer, ForeignKey("marketplace_items.id"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    item_id = Column(Integer, ForeignKey("marketplace_items.id", ondelete="CASCADE"), primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 class Confession(Base):
     __tablename__ = "confessions"
@@ -87,8 +94,8 @@ class Confession(Base):
 class ConfessionLike(Base):
     __tablename__ = "confession_likes"
 
-    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    confession_id = Column(Integer, ForeignKey("confessions.id"), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    confession_id = Column(Integer, ForeignKey("confessions.id", ondelete="CASCADE"), primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 class StudentApp(Base):
     __tablename__ = "student_apps"

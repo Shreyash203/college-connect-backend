@@ -28,17 +28,34 @@ from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from app.core.redis import redis_service
 from app.db.session import SessionLocal
-from app.db.models import Confession, MarketplaceItem
+from app.db.models import Confession, MarketplaceItem, ConfessionLike, MarketplaceInterest
 
 async def purge_expired_confessions_loop():
     while True:
         try:
             db = SessionLocal()
             cutoff = datetime.utcnow() - timedelta(hours=48)
-            deleted_count = db.query(Confession).filter(Confession.created_at < cutoff).delete()
+            # Find expired confessions
+            expired_confessions = db.query(Confession.id).filter(Confession.created_at < cutoff).all()
+            expired_confession_ids = [c[0] for c in expired_confessions]
+            
+            deleted_count = 0
+            if expired_confession_ids:
+                # Delete likes first to satisfy foreign key constraints
+                db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(expired_confession_ids)).delete(synchronize_session=False)
+                # Delete confessions
+                deleted_count = db.query(Confession).filter(Confession.id.in_(expired_confession_ids)).delete(synchronize_session=False)
             
             bazaar_cutoff = datetime.utcnow() - timedelta(days=14)
-            bazaar_deleted_count = db.query(MarketplaceItem).filter(MarketplaceItem.created_at < bazaar_cutoff).delete()
+            expired_items = db.query(MarketplaceItem.id).filter(MarketplaceItem.created_at < bazaar_cutoff).all()
+            expired_item_ids = [i[0] for i in expired_items]
+            
+            bazaar_deleted_count = 0
+            if expired_item_ids:
+                # Delete interests first to satisfy foreign key constraints
+                db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(expired_item_ids)).delete(synchronize_session=False)
+                # Delete items
+                bazaar_deleted_count = db.query(MarketplaceItem).filter(MarketplaceItem.id.in_(expired_item_ids)).delete(synchronize_session=False)
             
             db.commit()
             db.close()

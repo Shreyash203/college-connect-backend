@@ -10,7 +10,7 @@ import redis.asyncio as aioredis
 from app.core import email_client, email_verification, security
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.db.models import User, StudentProfile, profile_interests
+from app.db.models import User, StudentProfile, profile_interests, AuthorizedDomain
 from app.core.redis import get_redis
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -61,9 +61,10 @@ async def register(
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
-    allowed_domains = settings.authorized_email_domains_list
     email_domain = user_create.email.split("@")[-1].lower()
-    if email_domain not in allowed_domains:
+    
+    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
+    if not is_authorized:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only authorized email domains are permitted.",
@@ -145,6 +146,7 @@ async def verify_registration(
 
     user = User(
         email=pending_data["email"],
+        college_domain=pending_data["email"].split('@')[-1] if '@' in pending_data["email"] else "",
         password_hash=pending_data["password_hash"],
         is_verified=True,
     )
@@ -250,8 +252,9 @@ async def google_login(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
 
     domain = email.split("@")[-1].lower() if "@" in email else ""
-    allowed_domains = settings.authorized_email_domains_list
-    if allowed_domains and domain not in allowed_domains:
+    
+    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
+    if not is_authorized:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Your college domain (@{domain}) is not authorized for College Connect."
@@ -261,6 +264,7 @@ async def google_login(
     if not user:
         user = User(
             email=email,
+            college_domain=domain,
             password_hash=security.get_password_hash(uuid.uuid4().hex),
             is_verified=True,
         )

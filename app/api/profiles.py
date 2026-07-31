@@ -149,8 +149,23 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/profiles", response_model=List[ProfileRead])
-def list_profiles(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
-    profiles = db.query(StudentProfile).order_by(StudentProfile.created_at.desc()).offset(skip).limit(limit).all()
+def list_profiles(
+    skip: int = 0, 
+    limit: int = 20, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
+    
+    profiles = (
+        db.query(StudentProfile)
+        .join(User, StudentProfile.user_id == User.id)
+        .filter(User.college_domain == current_domain)
+        .order_by(StudentProfile.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return [profile_to_response(profile) for profile in profiles]
 
 
