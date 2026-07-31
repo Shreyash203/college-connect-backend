@@ -65,10 +65,18 @@ async def register(
     
     is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
     if not is_authorized:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only authorized email domains are permitted.",
-        )
+        if email_domain.endswith(('.ac.in', '.edu.in')):
+            try:
+                new_domain = AuthorizedDomain(domain=email_domain)
+                db.add(new_domain)
+                db.commit()
+            except Exception:
+                db.rollback() # Handle rare race conditions cleanly
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only authorized email domains are permitted.",
+            )
 
     if len(user_create.password.encode("utf-8")) > 72:
         raise HTTPException(
@@ -255,10 +263,18 @@ async def google_login(
     
     is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
     if not is_authorized:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Your college domain (@{domain}) is not authorized for College Connect."
-        )
+        if domain.endswith(('.ac.in', '.edu.in')):
+            try:
+                new_domain = AuthorizedDomain(domain=domain)
+                db.add(new_domain)
+                db.commit()
+            except Exception:
+                db.rollback()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+            )
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
