@@ -35,7 +35,7 @@ async def create_confession(
     # Invalidate cache so the new post appears instantly
     redis = redis_service.get_client()
     try:
-        keys = await redis.keys("cache:confessions:*")
+        keys = await redis.keys("cache:confessions:global:*")
         if keys:
             await redis.delete(*keys)
     except Exception:
@@ -56,43 +56,70 @@ async def get_all_confessions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
-    # Auto-expiry: 48 hours cutoff
-    cutoff = datetime.utcnow() - timedelta(hours=48)
+    cache_key = f"cache:confessions:global:{skip}:{limit}"
+    redis = redis_service.get_client()
     
-    def fetch_confessions():
-        confessions = (
-            db.query(Confession)
-            .filter(Confession.created_at >= cutoff)
-            .order_by(Confession.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
-        if not confessions:
-            return []
-            
-        confession_ids = [c.id for c in confessions]
-        likes = db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(confession_ids)).all()
+    data = None
+    try:
+        cached_data = await redis.get(cache_key)
+        if cached_data:
+            data = json.loads(cached_data)
+    except Exception:
+        pass
+
+    if data is None:
+        # Cache Miss - Auto-expiry: 48 hours cutoff
+        cutoff = datetime.utcnow() - timedelta(hours=48)
         
-        # Build map of confession_id -> list of user_ids who liked it
-        likes_map = {cid: [] for cid in confession_ids}
-        for like in likes:
-            likes_map[like.confession_id].append(like.user_id)
+        def fetch_confessions_from_db():
+            confessions = (
+                db.query(Confession)
+                .filter(Confession.created_at >= cutoff)
+                .order_by(Confession.created_at.desc())
+                .offset(skip)
+                .limit(limit)
+                .all()
+            )
+            if not confessions:
+                return []
+                
+            confession_ids = [c.id for c in confessions]
+            likes = db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(confession_ids)).all()
             
-        return [(c, likes_map[c.id]) for c in confessions]
+            likes_map = {cid: [] for cid in confession_ids}
+            for like in likes:
+                likes_map[like.confession_id].append(like.user_id)
+                
+            serialized_data = []
+            for c in confessions:
+                serialized_data.append({
+                    "id": c.id,
+                    "user_id": c.user_id,
+                    "college_domain": c.college_domain,
+                    "content": c.content,
+                    "created_at": c.created_at.isoformat(),
+                    "liked_by_users": likes_map[c.id]
+                })
+            return serialized_data
+            
+        data = await run_in_threadpool(fetch_confessions_from_db)
         
-    data = await run_in_threadpool(fetch_confessions)
+        try:
+            if data:
+                await redis.setex(cache_key, 60, json.dumps(data))
+        except Exception:
+            pass
     
     results = []
-    for c, liked_by_users in data:
+    for item in data:
         results.append(ConfessionRead(
-            id=c.id,
-            college_domain=c.college_domain,
-            content=c.content,
-            created_at=c.created_at,
-            is_mine=(c.user_id == current_user.id) or current_user.is_admin,
-            likes_count=len(liked_by_users),
-            has_liked=current_user.id in liked_by_users
+            id=item["id"],
+            college_domain=item["college_domain"],
+            content=item["content"],
+            created_at=item["created_at"],
+            is_mine=(item["user_id"] == current_user.id) or current_user.is_admin,
+            likes_count=len(item["liked_by_users"]),
+            has_liked=current_user.id in item["liked_by_users"]
         ))
         
     return results
@@ -144,7 +171,7 @@ async def delete_confession(
     # Invalidate cache so the deleted post disappears instantly
     redis = redis_service.get_client()
     try:
-        keys = await redis.keys("cache:confessions:*")
+        keys = await redis.keys("cache:confessions:global:*")
         if keys:
             await redis.delete(*keys)
     except Exception:
