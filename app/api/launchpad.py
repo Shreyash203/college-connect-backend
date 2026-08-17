@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/launchpad", tags=["Launchpad"])
 
-@router.post("/", response_model=StudentAppRead, dependencies=[Depends(SlidingWindowRateLimiter(limit=2, window_seconds=3600))])
+@router.post("/", response_model=StudentAppRead)
 def create_app(
     app_in: StudentAppCreate,
     db: Session = Depends(get_db),
