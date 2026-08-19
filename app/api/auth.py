@@ -10,8 +10,11 @@ import redis.asyncio as aioredis
 from app.core import email_client, email_verification, security
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.db.models import User, StudentProfile, profile_interests
+from app.db.models import User, StudentProfile, profile_interests, AuthorizedDomain
 from app.core.redis import get_redis
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+
 from app.core.rate_limiter import SlidingWindowRateLimiter, DailyUploadRateLimiter
 from app.schemas.auth import (
     DeleteUserRequest,
@@ -22,6 +25,7 @@ from app.schemas.auth import (
     ResendOtpRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    GoogleLoginRequest,
 )
 
 router = APIRouter()
@@ -51,19 +55,28 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
-@router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
     user_create: UserCreate, 
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
-    allowed_domains = settings.authorized_email_domains_list
     email_domain = user_create.email.split("@")[-1].lower()
-    if email_domain not in allowed_domains:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only authorized email domains are permitted.",
-        )
+    
+    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
+    if not is_authorized:
+        if email_domain.endswith(('.ac.in', '.edu.in')):
+            try:
+                new_domain = AuthorizedDomain(domain=email_domain)
+                db.add(new_domain)
+                db.commit()
+            except Exception:
+                db.rollback() # Handle rare race conditions cleanly
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only authorized email domains are permitted.",
+            )
 
     if len(user_create.password.encode("utf-8")) > 72:
         raise HTTPException(
@@ -117,7 +130,7 @@ async def register(
     return RegisterResponse(pending_id=pending_id, message="Registration initiated. Check your email for the verification code.")
 
 
-@router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=10, window_seconds=60))])
+@router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def verify_registration(
     payload: VerifyRegistrationRequest, 
     db: Session = Depends(get_db), 
@@ -141,6 +154,7 @@ async def verify_registration(
 
     user = User(
         email=pending_data["email"],
+        college_domain=pending_data["email"].split('@')[-1] if '@' in pending_data["email"] else "",
         password_hash=pending_data["password_hash"],
         is_verified=True,
     )
@@ -156,7 +170,7 @@ async def verify_registration(
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 
 
-@router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=3, window_seconds=60))])
+@router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def resend_otp(
     payload: ResendOtpRequest, 
     redis_client: aioredis.Redis = Depends(get_redis)
@@ -193,7 +207,7 @@ async def resend_otp(
     return {"message": "A new verification code has been sent to your email."}
 
 
-@router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
@@ -214,7 +228,77 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=3, window_seconds=60))])
+import requests as http_requests
+
+@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
+async def google_login(
+    payload: GoogleLoginRequest, 
+    db: Session = Depends(get_db)
+):
+    id_info = None
+    try:
+        id_info = google_id_token.verify_oauth2_token(
+            payload.credential, 
+            google_requests.Request(), 
+            settings.GOOGLE_CLIENT_ID
+        )
+    except Exception:
+        try:
+            resp = http_requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={payload.credential}", timeout=5)
+            if resp.status_code == 200:
+                id_info = resp.json()
+            else:
+                raise Exception(resp.text)
+        except Exception as fallback_exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid Google token: {str(fallback_exc)}"
+            )
+
+    email = id_info.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
+
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    
+    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
+    if not is_authorized:
+        if domain.endswith(('.ac.in', '.edu.in')):
+            try:
+                new_domain = AuthorizedDomain(domain=domain)
+                db.add(new_domain)
+                db.commit()
+            except Exception:
+                db.rollback()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+            )
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(
+            email=email,
+            college_domain=domain,
+            password_hash=security.get_password_hash(uuid.uuid4().hex),
+            is_verified=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif not user.is_verified:
+        user.is_verified = True
+        db.commit()
+
+    access_token = security.create_access_token(
+        subject=str(user.id), 
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
+
+
+@router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def forgot_password(
     payload: ForgotPasswordRequest, 
     db: Session = Depends(get_db), 
@@ -249,7 +333,7 @@ async def forgot_password(
     return {"message": "Password reset code sent to your email."}
 
 
-@router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def reset_password(
     payload: ResetPasswordRequest, 
     db: Session = Depends(get_db), 

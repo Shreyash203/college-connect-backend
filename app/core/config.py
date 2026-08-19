@@ -25,8 +25,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(60, env="ACCESS_TOKEN_EXPIRE_MINUTES")
     JWT_SECRET_KEY: Optional[str] = Field(None, env="JWT_SECRET_KEY")
     JWT_ALGORITHM: str = "HS256"
-
-    AUTHORIZED_EMAIL_DOMAINS: str = Field("iith.ac.in,gmail.com", env="AUTHORIZED_EMAIL_DOMAINS")
+    GOOGLE_CLIENT_ID: str = Field("774747436427-57ign6kn9qt9tat4ipq7cnb04hio3rmn.apps.googleusercontent.com", env="GOOGLE_CLIENT_ID")
 
     EMAIL_PROVIDER: str = Field("acs", env="EMAIL_PROVIDER")
     EMAIL_FROM: Optional[str] = Field(None, env="EMAIL_FROM")
@@ -45,11 +44,14 @@ class Settings(BaseSettings):
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
     AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
     REDIS_URL: str = Field("redis://localhost:6379/0", env="REDIS_URL")
+    ADMIN_EMAILS: str = Field("shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
+
+
 
 
     @property
-    def authorized_email_domains_list(self) -> list[str]:
-        return [d.strip().lower() for d in self.AUTHORIZED_EMAIL_DOMAINS.split(",") if d.strip()]
+    def admin_emails_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",") if e.strip()]
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -85,7 +87,6 @@ class Settings(BaseSettings):
                 ("DATABASE_URL", "DATABASE-URL"),
                 ("JWT_SECRET_KEY", "JWT-SECRET-KEY"),
                 ("ACCESS_TOKEN_EXPIRE_MINUTES", "ACCESS-TOKEN-EXPIRE-MINUTES"),
-                ("AUTHORIZED_EMAIL_DOMAINS", "AUTHORIZED-EMAIL-DOMAINS"),
                 ("EMAIL_PROVIDER", "EMAIL-PROVIDER"),
                 ("EMAIL_FROM", "EMAIL-FROM"),
                 ("ACS_EMAIL_SENDER", "ACS-EMAIL-SENDER"),

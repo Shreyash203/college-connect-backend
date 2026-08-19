@@ -76,6 +76,7 @@ def create_profile(
         department=profile_in.department,
         year=profile_in.year,
         bio=profile_in.bio,
+        image_url=profile_in.image_url,
     )
     db.add(profile)
     db.commit()
@@ -112,6 +113,8 @@ def update_profile(
     profile.department = profile_in.department
     profile.year = profile_in.year
     profile.bio = profile_in.bio
+    if profile_in.image_url:
+        profile.image_url = profile_in.image_url
 
     # Update interests
     new_interests = []
@@ -146,8 +149,23 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/profiles", response_model=List[ProfileRead])
-def list_profiles(db: Session = Depends(get_db)):
-    profiles = db.query(StudentProfile).all()
+def list_profiles(
+    skip: int = 0, 
+    limit: int = 20, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
+    
+    profiles = (
+        db.query(StudentProfile)
+        .join(User, StudentProfile.user_id == User.id)
+        .filter(User.college_domain == current_domain)
+        .order_by(StudentProfile.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return [profile_to_response(profile) for profile in profiles]
 
 
@@ -178,14 +196,8 @@ def get_profile_upload_url(
     
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
-    try:
-        container_client.create_container()
-        container_client.set_container_access_policy(public_access='blob')
-    except Exception:
-        try:
-            container_client.set_container_access_policy(public_access='blob')
-        except Exception:
-            pass
+    # We assume the container already exists and has the correct access policy.
+    # Calling create_container() on every upload causes severe latency and potential timeouts.
 
     # Generate upload SAS token with WRITE and CREATE permissions (1 hour expiry)
     upload_sas_token = generate_blob_sas(
@@ -198,14 +210,14 @@ def get_profile_upload_url(
     )
     upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
     
-    # Generate read-only SAS token for viewing (30 days)
+    # Generate read-only SAS token for viewing (30 days) to bypass strict Azure public access blocks
     read_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
         blob_name=blob_name,
         account_key=account_key,
         permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(days=30),
+        expiry=datetime.utcnow() + timedelta(days=36500), # 100 years to prevent expiration
     )
     image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
     

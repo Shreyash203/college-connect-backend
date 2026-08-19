@@ -16,7 +16,12 @@ class SlidingWindowRateLimiter:
         self.window_seconds = window_seconds
 
     async def __call__(self, request: Request):
-        client_ip = request.client.host if request.client else "unknown"
+        # Since Azure Container Apps sit behind a proxy, we must get the real IP from X-Forwarded-For
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+        else:
+            client_ip = request.client.host if request.client else "unknown"
         endpoint = request.url.path
         key = f"rate_limit:{client_ip}:{endpoint}"
 
@@ -59,7 +64,12 @@ class DailyUploadRateLimiter:
         self.limit = limit
 
     async def __call__(self, request: Request):
-        client_ip = request.client.host if request.client else "unknown"
+        # Since Azure Container Apps sit behind a proxy, we must get the real IP from X-Forwarded-For
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+        else:
+            client_ip = request.client.host if request.client else "unknown"
         endpoint = request.url.path
         
         # Only limit upload endpoints

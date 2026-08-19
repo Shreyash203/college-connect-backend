@@ -11,18 +11,29 @@ profile_interests = Table(
     Column("interest_id", ForeignKey("interests.id"), primary_key=True),
 )
 
+class AuthorizedDomain(Base):
+    __tablename__ = "authorized_domains"
+
+    id = Column(Integer, primary_key=True, index=True)
+    domain = Column(String(255), unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
+    college_domain = Column(String(255), index=True, nullable=True) # Indexed for fast silo queries
     password_hash = Column(String(255), nullable=False)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    profile = relationship("StudentProfile", back_populates="user", uselist=False)
+    @property
+    def is_admin(self) -> bool:
+        from app.core.config import settings
+        return self.email.lower() in settings.admin_emails_list
 
+    profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
 
 class StudentProfile(Base):
@@ -60,3 +71,53 @@ class MarketplaceItem(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="marketplace_items")
+
+
+class MarketplaceInterest(Base):
+    __tablename__ = "marketplace_interests"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    item_id = Column(Integer, ForeignKey("marketplace_items.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+class Confession(Base):
+    __tablename__ = "confessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    college_domain = Column(String(255), nullable=False)
+    content = Column(String(1000), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", backref="confessions")
+
+
+class ConfessionLike(Base):
+    __tablename__ = "confession_likes"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    confession_id = Column(Integer, ForeignKey("confessions.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+class StudentApp(Base):
+    __tablename__ = "student_apps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    app_name = Column(String(255), nullable=False)
+    description = Column(String(1000), nullable=False)
+    app_url = Column(String(255), nullable=True)
+    college_domain = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User", backref="student_apps")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    message = Column(String(1000), nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="notifications")

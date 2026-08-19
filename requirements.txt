@@ -17,4 +17,6 @@ azure-keyvault-secrets
 azure-communication-email
 redis
 locust
+google-auth
+requests
 
