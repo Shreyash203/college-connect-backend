@@ -55,7 +55,7 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
-@router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
     user_create: UserCreate, 
     db: Session = Depends(get_db), 
@@ -130,7 +130,7 @@ async def register(
     return RegisterResponse(pending_id=pending_id, message="Registration initiated. Check your email for the verification code.")
 
 
-@router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=10, window_seconds=60))])
+@router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def verify_registration(
     payload: VerifyRegistrationRequest, 
     db: Session = Depends(get_db), 
@@ -170,7 +170,7 @@ async def verify_registration(
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 
 
-@router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=3, window_seconds=60))])
+@router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def resend_otp(
     payload: ResendOtpRequest, 
     redis_client: aioredis.Redis = Depends(get_redis)
@@ -207,7 +207,7 @@ async def resend_otp(
     return {"message": "A new verification code has been sent to your email."}
 
 
-@router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
@@ -230,7 +230,7 @@ async def login(
 
 import requests as http_requests
 
-@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=10, window_seconds=60))])
+@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def google_login(
     payload: GoogleLoginRequest, 
     db: Session = Depends(get_db)
@@ -298,7 +298,7 @@ async def google_login(
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 
 
-@router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=3, window_seconds=60))])
+@router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def forgot_password(
     payload: ForgotPasswordRequest, 
     db: Session = Depends(get_db), 
@@ -333,7 +333,7 @@ async def forgot_password(
     return {"message": "Password reset code sent to your email."}
 
 
-@router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=60))])
+@router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def reset_password(
     payload: ResetPasswordRequest, 
     db: Session = Depends(get_db), 

@@ -15,12 +15,25 @@ from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/confessions", tags=["Confessions"])
 
-@router.post("/", response_model=ConfessionRead, dependencies=[Depends(SlidingWindowRateLimiter(limit=5, window_seconds=3600))])
+@router.post("/", response_model=ConfessionRead)
 async def create_confession(
     confession_in: ConfessionCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
+    # User-based rate limiter: max 3 confessions per hour
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    recent_confessions = db.query(Confession).filter(
+        Confession.user_id == current_user.id,
+        Confession.created_at >= cutoff
+    ).count()
+    
+    if recent_confessions >= 3:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="You can only post 3 confessions per hour to prevent spam."
+        )
+
     college_domain = current_user.email.split("@")[-1] if "@" in current_user.email else "unknown"
     
     new_confession = Confession(
