@@ -22,6 +22,7 @@ def profile_to_response(profile: StudentProfile) -> dict:
     return {
         "id": profile.id,
         "user_id": profile.user_id,
+        "email": profile.user.email if profile.user else None,
         "display_name": profile.display_name,
         "department": profile.department,
         "year": profile.year,

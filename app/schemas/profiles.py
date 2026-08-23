@@ -16,6 +16,7 @@ class ProfileRead(BaseModel):
     image_url: Optional[str] = None
     id: int
     user_id: int
+    email: Optional[str] = None
     display_name: Optional[str]
     department: Optional[str]
     year: Optional[str]
