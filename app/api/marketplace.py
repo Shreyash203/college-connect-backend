@@ -19,14 +19,11 @@ from app.schemas.marketplace import MarketplaceItemCreate
 
 router = APIRouter()
 
-@router.get("/marketplace/items/upload-url", response_model=dict)
+@router.get("/marketplace/items/upload-url", response_model=dict, dependencies=[Depends(DailyUploadRateLimiter(limit=20))])
 def get_marketplace_upload_url(
     filename: str,
     current_user: User = Depends(get_current_verified_user),
 ):
-    # Apply rate limiting (3 uploads per day)
-    daily_limiter = DailyUploadRateLimiter(limit=3)
-    
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
     
@@ -80,6 +77,14 @@ async def create_marketplace_item(
     current_user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
+    # Enforce maximum of 3 active listings per user
+    active_count = db.query(MarketplaceItem).filter(MarketplaceItem.user_id == current_user.id).count()
+    if active_count >= 3:
+        raise HTTPException(
+            status_code=400, 
+            detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
+        )
+
     item = MarketplaceItem(
         user_id=current_user.id,
         title=item_in.title,
@@ -153,6 +158,7 @@ async def list_marketplace_items(
             "description": i.description,
             "image_url": i.image_url,
             "user_id": i.user_id,
+            "email": i.user.email if i.user else None,
             "is_mine": (i.user_id == current_user.id) or current_user.is_admin,
             "interest_count": len(interested_users),
             "has_indicated_interest": current_user.id in interested_users

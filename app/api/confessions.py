@@ -48,11 +48,13 @@ async def create_confession(
     # Invalidate cache so the new post appears instantly
     redis = redis_service.get_client()
     try:
-        keys = await redis.keys("cache:confessions:global:*")
-        if keys:
-            await redis.delete(*keys)
-    except Exception:
-        pass
+        cursor = b'0'
+        while cursor:
+            cursor, keys = await redis.scan(cursor=cursor, match="cache:confessions:global:*", count=100)
+            if keys:
+                await redis.delete(*keys)
+    except Exception as e:
+        print(f"Cache clearing error: {e}")
     
     return ConfessionRead(
         id=new_confession.id,
@@ -184,8 +186,10 @@ async def delete_confession(
     # Invalidate cache so the deleted post disappears instantly
     redis = redis_service.get_client()
     try:
-        keys = await redis.keys("cache:confessions:global:*")
-        if keys:
-            await redis.delete(*keys)
-    except Exception:
-        pass
+        cursor = b'0'
+        while cursor:
+            cursor, keys = await redis.scan(cursor=cursor, match="cache:confessions:global:*", count=100)
+            if keys:
+                await redis.delete(*keys)
+    except Exception as e:
+        print(f"Cache clearing error: {e}")
