@@ -49,6 +49,7 @@ def create_app(
         college_domain=new_app.college_domain,
         created_at=new_app.created_at,
         user_id=new_app.user_id,
+        email=current_user.email,
         is_mine=True
     )
 
@@ -97,7 +98,8 @@ async def get_all_apps(
             "description": a.description,
             "app_url": a.app_url,
             "college_domain": a.college_domain,
-            "created_at": a.created_at.isoformat()
+            "email": a.user.email if a.user else None,
+            "created_at": a.created_at.isoformat() + "Z"
         })
         
         results.append(StudentAppRead(
@@ -108,6 +110,7 @@ async def get_all_apps(
             college_domain=a.college_domain,
             created_at=a.created_at,
             user_id=a.user_id,
+            email=a.user.email if a.user else None,
             is_mine=(a.user_id == current_user.id) or current_user.is_admin
         ))
         

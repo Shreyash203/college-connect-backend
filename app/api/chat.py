@@ -193,7 +193,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
                 "sender_id": msg.sender_id,
                 "content": msg.content,
                 "is_read": msg.is_read,
-                "created_at": msg.created_at.isoformat()
+                "created_at": msg.created_at.isoformat() + "Z"
             }
             msg_json = json.dumps(msg_data)
             

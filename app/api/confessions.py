@@ -48,11 +48,11 @@ async def create_confession(
     # Invalidate cache so the new post appears instantly
     redis = redis_service.get_client()
     try:
-        cursor = b'0'
-        while cursor:
-            cursor, keys = await redis.scan(cursor=cursor, match="cache:confessions:global:*", count=100)
-            if keys:
-                await redis.delete(*keys)
+        keys = []
+        async for key in redis.scan_iter(match="cache:confessions:global:*"):
+            keys.append(key)
+        if keys:
+            await redis.delete(*keys)
     except Exception as e:
         print(f"Cache clearing error: {e}")
     
@@ -112,7 +112,7 @@ async def get_all_confessions(
                     "user_id": c.user_id,
                     "college_domain": c.college_domain,
                     "content": c.content,
-                    "created_at": c.created_at.isoformat(),
+                    "created_at": c.created_at.isoformat() + "Z",
                     "liked_by_users": likes_map[c.id]
                 })
             return serialized_data
@@ -186,10 +186,10 @@ async def delete_confession(
     # Invalidate cache so the deleted post disappears instantly
     redis = redis_service.get_client()
     try:
-        cursor = b'0'
-        while cursor:
-            cursor, keys = await redis.scan(cursor=cursor, match="cache:confessions:global:*", count=100)
-            if keys:
-                await redis.delete(*keys)
+        keys = []
+        async for key in redis.scan_iter(match="cache:confessions:global:*"):
+            keys.append(key)
+        if keys:
+            await redis.delete(*keys)
     except Exception as e:
         print(f"Cache clearing error: {e}")

@@ -34,6 +34,7 @@ class StudentAppRead(BaseModel):
     college_domain: str
     created_at: datetime
     user_id: int
+    email: Optional[str] = None
     is_mine: bool = False
 
     class Config:
