@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class ProfileCreate(BaseModel):
     display_name: Optional[str]
     department: Optional[str]
-    year: Optional[str]
+    year: str
     bio: Optional[str]
     interests: List[str]
     image_url: Optional[str] = None

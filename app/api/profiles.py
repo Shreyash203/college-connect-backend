@@ -150,22 +150,39 @@ def get_profile(profile_id: int, db: Session = Depends(get_db)):
 
 @router.get("/profiles", response_model=List[ProfileRead])
 def list_profiles(
+    category: str | None = None,
     skip: int = 0, 
     limit: int = 20, 
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
+    from sqlalchemy import cast, Integer
+
     current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
     
-    profiles = (
+    query = (
         db.query(StudentProfile)
         .join(User, StudentProfile.user_id == User.id)
         .filter(User.college_domain == current_domain)
-        .order_by(StudentProfile.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        .filter(StudentProfile.user_id != current_user.id)  # Exclude self
     )
+
+    if category:
+        my_profile = current_user.profile
+        if not my_profile:
+            return []  # User needs a profile to use smart filters
+            
+        if category == 'hobbies' and my_profile.interests:
+            interest_names = [i.name for i in my_profile.interests]
+            query = query.join(StudentProfile.interests).filter(Interest.name.in_(interest_names))
+        elif category == 'batch' and my_profile.year:
+            query = query.filter(StudentProfile.year == my_profile.year)
+        elif category == 'seniors' and my_profile.year and my_profile.year.isdigit():
+            query = query.filter(cast(StudentProfile.year, Integer) < int(my_profile.year))
+        elif category == 'juniors' and my_profile.year and my_profile.year.isdigit():
+            query = query.filter(cast(StudentProfile.year, Integer) > int(my_profile.year))
+
+    profiles = query.order_by(StudentProfile.created_at.desc()).offset(skip).limit(limit).all()
     return [profile_to_response(profile) for profile in profiles]
 
 
