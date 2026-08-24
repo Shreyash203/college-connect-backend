@@ -126,12 +126,17 @@ async def list_marketplace_items(
         # Extract exact literal domain (e.g., alumni.iith.ac.in or iith.ac.in)
         current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
         
-        items = (
+        query = (
             db.query(MarketplaceItem)
             .join(User, MarketplaceItem.user_id == User.id)
             .filter(MarketplaceItem.created_at >= cutoff)
-            .filter(User.college_domain == current_domain)
-            .order_by(MarketplaceItem.created_at.desc())
+        )
+        
+        if not current_user.is_admin:
+            query = query.filter(User.college_domain == current_domain)
+            
+        items = (
+            query.order_by(MarketplaceItem.created_at.desc())
             .offset(skip)
             .limit(limit)
             .all()

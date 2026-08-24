@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
     AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
     REDIS_URL: str = Field("redis://localhost:6379/0", env="REDIS_URL")
-    ADMIN_EMAILS: str = Field("shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
+    ADMIN_EMAILS: str = Field("shreyash.santosh.bhanage@gmail.com,shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
 
 
 

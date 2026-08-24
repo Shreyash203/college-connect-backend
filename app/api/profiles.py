@@ -164,9 +164,11 @@ def list_profiles(
     query = (
         db.query(StudentProfile)
         .join(User, StudentProfile.user_id == User.id)
-        .filter(User.college_domain == current_domain)
         .filter(StudentProfile.user_id != current_user.id)  # Exclude self
     )
+    
+    if not current_user.is_admin:
+        query = query.filter(User.college_domain == current_domain)
 
     if category:
         my_profile = current_user.profile
