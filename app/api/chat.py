@@ -147,7 +147,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         user_id = payload.get("sub")
-        if user_id is None:
+        token_type = payload.get("type")
+        if user_id is None or token_type != "access":
             raise ValueError("Invalid token")
         user = db.query(User).filter(User.id == int(user_id)).first()
         if not user:

@@ -22,7 +22,8 @@ class Settings(BaseSettings):
 
     DATABASE_URL: Optional[str] = Field(None, env="DATABASE_URL")
 
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(60, env="ACCESS_TOKEN_EXPIRE_MINUTES")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(30, env="ACCESS_TOKEN_EXPIRE_MINUTES")
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(7, env="REFRESH_TOKEN_EXPIRE_DAYS")
     JWT_SECRET_KEY: Optional[str] = Field(None, env="JWT_SECRET_KEY")
     JWT_ALGORITHM: str = "HS256"
     GOOGLE_CLIENT_ID: str = Field("774747436427-57ign6kn9qt9tat4ipq7cnb04hio3rmn.apps.googleusercontent.com", env="GOOGLE_CLIENT_ID")

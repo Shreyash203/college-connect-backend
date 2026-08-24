@@ -2,7 +2,7 @@ import uuid
 import json
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 import redis.asyncio as aioredis
@@ -133,6 +133,7 @@ async def register(
 @router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def verify_registration(
     payload: VerifyRegistrationRequest, 
+    response: Response,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
@@ -167,7 +168,22 @@ async def verify_registration(
     await redis_client.delete(f"pending_email:{pending_data['email']}")
 
     access_token = security.create_access_token(subject=str(user.id))
-    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "user_id": user.id
+    }
 
 
 @router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
@@ -209,6 +225,7 @@ async def resend_otp(
 
 @router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def login(
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
 ):
@@ -225,14 +242,29 @@ async def login(
             detail="Email address must be verified before login.",
         )
     access_token = security.create_access_token(subject=str(user.id), expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer"
+    }
 
 
 import requests as http_requests
 
-@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
+@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def google_login(
     payload: GoogleLoginRequest, 
+    response: Response,
     db: Session = Depends(get_db)
 ):
     id_info = None
@@ -295,7 +327,67 @@ async def google_login(
         subject=str(user.id), 
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "user_id": user.id
+    }
+
+
+@router.post("/auth/refresh")
+async def refresh_token(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    db: Session = Depends(get_db)
+):
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token missing")
+    try:
+        payload = jwt.decode(refresh_token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        if user_id is None or token_type != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+            
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user or not user.is_verified:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+            
+        # Generate new tokens
+        new_access_token = security.create_access_token(subject=str(user.id))
+        new_refresh_token = security.create_refresh_token(subject=str(user.id))
+        
+        response.set_cookie(
+            key="refresh_token",
+            value=new_refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="none",
+            max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+        )
+        
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer"
+        }
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("refresh_token", samesite="none", secure=True)
+    return {"message": "Logged out successfully"}
 
 
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
