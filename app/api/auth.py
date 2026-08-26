@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 import redis.asyncio as aioredis
 
@@ -355,7 +356,7 @@ async def refresh_token(
         raise HTTPException(status_code=401, detail="Refresh token missing")
     try:
         payload = jwt.decode(refresh_token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id: str = payload.get("sub")
+        user_id: str = payload.get("sub") 
         token_type: str = payload.get("type")
         if user_id is None or token_type != "refresh":
             raise HTTPException(status_code=401, detail="Invalid refresh token")
