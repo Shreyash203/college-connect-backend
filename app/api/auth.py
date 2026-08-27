@@ -63,21 +63,29 @@ async def register(
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     email_domain = user_create.email.split("@")[-1].lower()
+    is_admin_email = user_create.email.lower() in settings.admin_emails_list
     
-    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
-    if not is_authorized:
-        if email_domain.endswith(('.ac.in', '.edu.in')):
-            try:
-                new_domain = AuthorizedDomain(domain=email_domain)
-                db.add(new_domain)
-                db.commit()
-            except Exception:
-                db.rollback() # Handle rare race conditions cleanly
-        else:
+    if not is_admin_email:
+        if email_domain == "gmail.com":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only authorized email domains are permitted.",
+                detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
+        
+        is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
+        if not is_authorized:
+            if email_domain.endswith(('.ac.in', '.edu.in')):
+                try:
+                    new_domain = AuthorizedDomain(domain=email_domain)
+                    db.add(new_domain)
+                    db.commit()
+                except Exception:
+                    db.rollback() # Handle rare race conditions cleanly
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Only authorized email domains are permitted.",
+                )
 
     if len(user_create.password.encode("utf-8")) > 72:
         raise HTTPException(
@@ -293,21 +301,29 @@ async def google_login(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
 
     domain = email.split("@")[-1].lower() if "@" in email else ""
+    is_admin_email = email.lower() in settings.admin_emails_list
     
-    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
-    if not is_authorized:
-        if domain.endswith(('.ac.in', '.edu.in')):
-            try:
-                new_domain = AuthorizedDomain(domain=domain)
-                db.add(new_domain)
-                db.commit()
-            except Exception:
-                db.rollback()
-        else:
+    if not is_admin_email:
+        if domain == "gmail.com":
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
+        
+        is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
+        if not is_authorized:
+            if domain.endswith(('.ac.in', '.edu.in')):
+                try:
+                    new_domain = AuthorizedDomain(domain=domain)
+                    db.add(new_domain)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+                )
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
