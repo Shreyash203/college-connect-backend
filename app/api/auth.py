@@ -11,7 +11,12 @@ import redis.asyncio as aioredis
 from app.core import email_client, email_verification, security
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.db.models import User, StudentProfile, profile_interests, AuthorizedDomain
+from app.db.models import (
+    User, StudentProfile, profile_interests, AuthorizedDomain,
+    MarketplaceItem, Confession, StudentApp, Notification, 
+    Conversation, Message, MarketplaceInterest, ConfessionLike
+)
+from app.core.dependencies import get_current_user
 from app.core.redis import get_redis
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -38,6 +43,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def auto_create_default_profile(db: Session, user: User):
+    """Auto-create a default profile for a user so they can browse immediately."""
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
+    if not profile:
+        display_name = user.email.split('@')[0].replace('.', ' ').title()
+        default_profile = StudentProfile(
+            user_id=user.id,
+            display_name=display_name,
+            year="2023",
+            department="Unknown",
+            bio="Hi! I just joined College Connect.",
+            image_url=f"https://ui-avatars.com/api/?name={display_name.replace(' ', '+')}&background=random&color=fff&size=256"
+        )
+        db.add(default_profile)
+        db.commit()
 
 
 def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, plain_body: str):
@@ -172,6 +193,8 @@ async def verify_registration(
     db.commit()
     db.refresh(user)
 
+    auto_create_default_profile(db, user)
+
     # Clean up Redis records
     await redis_client.delete(pending_key)
     await redis_client.delete(f"pending_email:{pending_data['email']}")
@@ -250,6 +273,9 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email address must be verified before login.",
         )
+
+    auto_create_default_profile(db, user)
+
     access_token = security.create_access_token(subject=str(user.id), expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     refresh_token = security.create_refresh_token(subject=str(user.id))
     
@@ -340,6 +366,8 @@ async def google_login(
         user.is_verified = True
         db.commit()
 
+    auto_create_default_profile(db, user)
+
     access_token = security.create_access_token(
         subject=str(user.id), 
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -405,6 +433,47 @@ async def refresh_token(
 async def logout(response: Response):
     response.delete_cookie("refresh_token", samesite="none", secure=True)
     return {"message": "Logged out successfully"}
+
+
+@router.delete("/auth/me")
+async def delete_my_account(
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    uid = current_user.id
+    
+    # Profile & Interests
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == uid).first()
+    if profile:
+        db.execute(profile_interests.delete().where(profile_interests.c.profile_id == profile.id))
+        db.delete(profile)
+        
+    # Conversations & Messages
+    db.query(Message).filter(Message.sender_id == uid).delete()
+    conversations = db.query(Conversation).filter((Conversation.user1_id == uid) | (Conversation.user2_id == uid)).all()
+    for conv in conversations:
+        db.query(Message).filter(Message.conversation_id == conv.id).delete()
+        db.delete(conv)
+        
+    # Interactions
+    db.query(MarketplaceInterest).filter(MarketplaceInterest.user_id == uid).delete()
+    db.query(ConfessionLike).filter(ConfessionLike.user_id == uid).delete()
+    db.query(Notification).filter(Notification.user_id == uid).delete()
+    
+    # Main Items
+    db.query(StudentApp).filter(StudentApp.user_id == uid).delete()
+    db.query(MarketplaceItem).filter(MarketplaceItem.user_id == uid).delete()
+    db.query(Confession).filter(Confession.user_id == uid).delete()
+    
+    # Finally User
+    user_to_delete = db.query(User).filter(User.id == uid).first()
+    if user_to_delete:
+        db.delete(user_to_delete)
+    db.commit()
+    
+    response.delete_cookie("refresh_token", samesite="none", secure=True)
+    return {"message": "Account successfully deleted."}
 
 
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
