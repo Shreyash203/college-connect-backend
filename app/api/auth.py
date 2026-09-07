@@ -44,18 +44,25 @@ def get_db():
     finally:
         db.close()
 
-def auto_create_default_profile(db: Session, user: User):
+def auto_create_default_profile(db: Session, user: User, google_picture: str = None, google_name: str = None):
     """Auto-create a default profile for a user so they can browse immediately."""
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
     if not profile:
-        display_name = user.email.split('@')[0].replace('.', ' ').title()
+        display_name = google_name if google_name else user.email.split('@')[0].replace('.', ' ').title()
+        
+        # Use Google Picture if available, otherwise generate a UI Avatar
+        if google_picture:
+            image_url = google_picture
+        else:
+            image_url = f"https://ui-avatars.com/api/?name={display_name.replace(' ', '+')}&background=random&color=fff&size=256"
+            
         default_profile = StudentProfile(
             user_id=user.id,
             display_name=display_name,
             year="2023",
             department="Unknown",
             bio="Hi! I just joined College Connect.",
-            image_url=f"https://ui-avatars.com/api/?name={display_name.replace(' ', '+')}&background=random&color=fff&size=256"
+            image_url=image_url
         )
         db.add(default_profile)
         db.commit()
@@ -366,7 +373,9 @@ async def google_login(
         user.is_verified = True
         db.commit()
 
-    auto_create_default_profile(db, user)
+    google_picture = id_info.get("picture")
+    google_name = id_info.get("name")
+    auto_create_default_profile(db, user, google_picture, google_name)
 
     access_token = security.create_access_token(
         subject=str(user.id), 
