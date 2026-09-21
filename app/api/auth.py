@@ -2,7 +2,7 @@ import uuid
 import json
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
@@ -87,6 +87,7 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
 @router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
     user_create: UserCreate, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
@@ -162,7 +163,13 @@ async def register(
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=user_create.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=user_create.email, 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
     return RegisterResponse(pending_id=pending_id, message="Registration initiated. Check your email for the verification code.")
 
@@ -228,6 +235,7 @@ async def verify_registration(
 @router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def resend_otp(
     payload: ResendOtpRequest, 
+    background_tasks: BackgroundTasks,
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     pending_key = f"pending_registration:{payload.pending_id}"
@@ -257,7 +265,13 @@ async def resend_otp(
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=pending_data["email"], subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=pending_data["email"], 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
     return {"message": "A new verification code has been sent to your email."}
 
@@ -488,6 +502,7 @@ async def delete_my_account(
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def forgot_password(
     payload: ForgotPasswordRequest, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
@@ -515,7 +530,13 @@ async def forgot_password(
         f"If you did not request this, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=user.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=user.email, 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
     return {"message": "Password reset code sent to your email."}
 
