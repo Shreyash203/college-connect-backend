@@ -39,7 +39,8 @@ async def create_confession(
     new_confession = Confession(
         user_id=current_user.id,
         college_domain=college_domain,
-        content=confession_in.content
+        content=confession_in.content,
+        scope=confession_in.scope if confession_in.scope in ('global', 'college') else 'global'
     )
     db.add(new_confession)
     db.commit()
@@ -49,7 +50,7 @@ async def create_confession(
     redis = redis_service.get_client()
     try:
         keys = []
-        async for key in redis.scan_iter(match="cache:confessions:global:*"):
+        async for key in redis.scan_iter(match="cache:confessions:*"):
             keys.append(key)
         if keys:
             await redis.delete(*keys)
@@ -68,10 +69,15 @@ async def create_confession(
 async def get_all_confessions(
     skip: int = 0,
     limit: int = 20,
+    scope: str = "global",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user)
 ):
-    cache_key = f"cache:confessions:global:{skip}:{limit}"
+    if scope == "college" and current_user.college_domain:
+        cache_key = f"cache:confessions:college:{current_user.college_domain}:{skip}:{limit}"
+    else:
+        cache_key = f"cache:confessions:global:{skip}:{limit}"
+        
     redis = redis_service.get_client()
     
     data = None
@@ -87,10 +93,20 @@ async def get_all_confessions(
         cutoff = datetime.utcnow() - timedelta(hours=48)
         
         def fetch_confessions_from_db():
+            query = db.query(Confession).filter(Confession.created_at >= cutoff)
+            
+            if scope == "college":
+                # College tab: only confessions explicitly posted to college, from same college
+                query = query.filter(
+                    Confession.scope == 'college',
+                    Confession.college_domain == (current_user.college_domain or "unknown")
+                )
+            else:
+                # Global tab: only confessions explicitly posted globally
+                query = query.filter(Confession.scope == 'global')
+                
             confessions = (
-                db.query(Confession)
-                .filter(Confession.created_at >= cutoff)
-                .order_by(Confession.created_at.desc())
+                query.order_by(Confession.created_at.desc())
                 .offset(skip)
                 .limit(limit)
                 .all()
@@ -112,6 +128,7 @@ async def get_all_confessions(
                     "user_id": c.user_id,
                     "college_domain": c.college_domain,
                     "content": c.content,
+                    "scope": c.scope,
                     "created_at": c.created_at.isoformat() + "Z",
                     "liked_by_users": likes_map[c.id]
                 })
@@ -187,7 +204,7 @@ async def delete_confession(
     redis = redis_service.get_client()
     try:
         keys = []
-        async for key in redis.scan_iter(match="cache:confessions:global:*"):
+        async for key in redis.scan_iter(match="cache:confessions:*"):
             keys.append(key)
         if keys:
             await redis.delete(*keys)

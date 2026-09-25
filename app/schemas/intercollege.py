@@ -6,11 +6,13 @@ from datetime import datetime
 
 class ConfessionCreate(BaseModel):
     content: str
+    scope: str = 'global'  # 'global' or 'college'
 
 class ConfessionRead(BaseModel):
     id: int
     college_domain: str
     content: str
+    scope: str = 'global'
     created_at: datetime
     is_mine: bool = False
     likes_count: int = 0

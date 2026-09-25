@@ -86,6 +86,7 @@ class Confession(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     college_domain = Column(String(255), nullable=False)
     content = Column(String(1000), nullable=False)
+    scope = Column(String(20), nullable=False, default='global')  # 'global' or 'college'
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", backref="confessions")
