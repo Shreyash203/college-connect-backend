@@ -7,7 +7,7 @@ from app.core.redis import redis_service
 import json
 
 from app.core.dependencies import get_db
-from app.db.models import User, Confession, ConfessionLike
+from app.db.models import User, Confession, ConfessionLike, Notification
 from app.schemas.intercollege import ConfessionCreate, ConfessionRead
 from app.core.verified_dependencies import get_current_verified_user
 
@@ -178,6 +178,14 @@ async def toggle_like(
         new_like = ConfessionLike(user_id=current_user.id, confession_id=confession_id)
         db.add(new_like)
         liked = True
+
+        # Notify confession owner — but not if they liked their own post
+        if confession.user_id != current_user.id:
+            notif = Notification(
+                user_id=confession.user_id,
+                message="Someone liked your anonymous confession ❤️"
+            )
+            db.add(notif)
         
     db.commit()
     

@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.core.verified_dependencies import get_current_verified_user
-from app.db.models import User, StudentProfile, Conversation, Message
+from app.db.models import User, StudentProfile, Conversation, Message, Notification
 from app.schemas.chat import ConversationRead, MessageRead
 from app.core.redis import get_redis
 
@@ -187,6 +187,24 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
             conv.updated_at = msg.created_at
             db.commit()
             db.refresh(msg)
+            
+            # Send Notification to target user (avoiding spam if they already have an unread one from this user)
+            sender_profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
+            sender_name = sender_profile.display_name if sender_profile else "Someone"
+            
+            existing_notif = db.query(Notification).filter(
+                Notification.user_id == target_user_id,
+                Notification.is_read == False,
+                Notification.message == f"You have a new message from {sender_name} 💬"
+            ).first()
+            
+            if not existing_notif:
+                notif = Notification(
+                    user_id=target_user_id,
+                    message=f"You have a new message from {sender_name} 💬"
+                )
+                db.add(notif)
+                db.commit()
             
             msg_data = {
                 "id": msg.id,

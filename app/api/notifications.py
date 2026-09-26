@@ -39,3 +39,35 @@ def mark_as_read(
     notification.is_read = True
     db.commit()
     return {"message": "Notification marked as read"}
+
+@router.get("/unread-count")
+def get_unread_count(
+    current_user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db)
+):
+    count = db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).count()
+    return {"unread_count": count}
+
+@router.put("/mark-all-read")
+def mark_all_as_read(
+    current_user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db)
+):
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+    return {"message": "All notifications marked as read"}
+
+@router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
+def clear_all_notifications(
+    current_user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db)
+):
+    db.query(Notification).filter(Notification.user_id == current_user.id).delete()
+    db.commit()
+    return

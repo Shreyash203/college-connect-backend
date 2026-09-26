@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
 from app.core.verified_dependencies import get_current_verified_user
-from app.db.models import MarketplaceItem, User, MarketplaceInterest
+from app.db.models import MarketplaceItem, User, MarketplaceInterest, Notification
 from app.core.config import settings
 from app.core.rate_limiter import DailyUploadRateLimiter
 from fastapi.concurrency import run_in_threadpool
@@ -193,6 +193,14 @@ async def toggle_interest(
         new_interest = MarketplaceInterest(user_id=current_user.id, item_id=item_id)
         db.add(new_interest)
         interested = True
+
+        # Notify item owner — but not if they expressed interest in their own item
+        if item.user_id != current_user.id:
+            notif = Notification(
+                user_id=item.user_id,
+                message=f"Someone is interested in your listing: '{item.title}' 🛒"
+            )
+            db.add(notif)
         
     db.commit()
     
