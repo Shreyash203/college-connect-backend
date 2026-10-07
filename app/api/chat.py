@@ -201,7 +201,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
             if not existing_notif:
                 notif = Notification(
                     user_id=target_user_id,
-                    message=f"You have a new message from {sender_name} 💬"
+                    message=f"You have a new message from {sender_name} 💬",
+                    link=f"/messages?conversationId={conversation_id}"
                 )
                 db.add(notif)
                 db.commit()

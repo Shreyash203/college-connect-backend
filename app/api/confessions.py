@@ -156,6 +156,43 @@ async def get_all_confessions(
         
     return results
 
+@router.get("/{confession_id}", response_model=ConfessionRead)
+async def get_confession(
+    confession_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    """Fetch a single confession (used when opening a post from a notification)."""
+    confession = db.query(Confession).filter(Confession.id == confession_id).first()
+    if not confession:
+        raise HTTPException(status_code=404, detail="Confession not found")
+
+    is_owner = confession.user_id == current_user.id
+    if not is_owner and not current_user.is_admin:
+        # Same visibility rules as the feed — respond 404 so hidden posts aren't revealed
+        expired = confession.created_at < datetime.utcnow() - timedelta(hours=48)
+        other_college = (
+            confession.scope == 'college'
+            and confession.college_domain != (current_user.college_domain or "unknown")
+        )
+        if expired or other_college:
+            raise HTTPException(status_code=404, detail="Confession not found")
+
+    liked_by = [
+        like.user_id
+        for like in db.query(ConfessionLike).filter(ConfessionLike.confession_id == confession.id).all()
+    ]
+    return ConfessionRead(
+        id=confession.id,
+        college_domain=confession.college_domain,
+        content=confession.content,
+        scope=confession.scope,
+        created_at=confession.created_at,
+        is_mine=is_owner or current_user.is_admin,
+        likes_count=len(liked_by),
+        has_liked=current_user.id in liked_by
+    )
+
 @router.post("/{confession_id}/like")
 async def toggle_like(
     confession_id: int,
@@ -183,7 +220,8 @@ async def toggle_like(
         if confession.user_id != current_user.id:
             notif = Notification(
                 user_id=confession.user_id,
-                message="Someone liked your anonymous confession ❤️"
+                message="Someone liked your anonymous confession ❤️",
+                link=f"/feed?confession={confession.id}&scope={confession.scope or 'global'}"
             )
             db.add(notif)
         

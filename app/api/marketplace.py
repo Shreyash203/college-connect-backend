@@ -171,6 +171,42 @@ async def list_marketplace_items(
         
     return results
 
+@router.get("/marketplace/items/{item_id}", response_model=dict)
+def get_marketplace_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user)
+):
+    """Fetch a single listing (used when opening a listing from a notification)."""
+    item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    is_owner = item.user_id == current_user.id
+    if not is_owner and not current_user.is_admin:
+        # Same visibility rules as the list — respond 404 so hidden listings aren't revealed
+        current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
+        expired = item.created_at < datetime.utcnow() - timedelta(days=14)
+        other_college = not item.user or item.user.college_domain != current_domain
+        if expired or other_college:
+            raise HTTPException(status_code=404, detail="Item not found")
+
+    interested_users = [
+        i.user_id
+        for i in db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id == item.id).all()
+    ]
+    return {
+        "id": item.id,
+        "title": item.title,
+        "description": item.description,
+        "image_url": item.image_url,
+        "user_id": item.user_id,
+        "email": item.user.email if item.user else None,
+        "is_mine": is_owner or current_user.is_admin,
+        "interest_count": len(interested_users),
+        "has_indicated_interest": current_user.id in interested_users
+    }
+
 @router.post("/marketplace/items/{item_id}/interest")
 async def toggle_interest(
     item_id: int,
@@ -198,7 +234,8 @@ async def toggle_interest(
         if item.user_id != current_user.id:
             notif = Notification(
                 user_id=item.user_id,
-                message=f"Someone is interested in your listing: '{item.title}' 🛒"
+                message=f"Someone is interested in your listing: '{item.title}' 🛒",
+                link=f"/marketplace?item={item.id}"
             )
             db.add(notif)
         
