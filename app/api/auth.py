@@ -84,6 +84,25 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
+async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, max_requests: int = 3, window_seconds: int = 900):
+    """
+    Limits OTP emails to max_requests per window_seconds per email address.
+    Protects students from spam and caps Azure Communication Services email fees.
+    """
+    key = f"otp_email_rate:{email.lower().strip()}"
+    current = await redis_client.get(key)
+    if current and int(current) >= max_requests:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many verification codes requested for this email. Please wait 15 minutes before requesting another."
+        )
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        if not current:
+            pipe.expire(key, window_seconds)
+        await pipe.execute()
+
+
 @router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
     user_create: UserCreate, 
@@ -126,6 +145,9 @@ async def register(
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
 
+    # Enforce per-email rate limit to cap Azure email costs
+    await check_email_otp_rate_limit(redis_client, user_create.email)
+
     # Generate secure, unique pending ID and OTP code
     pending_id = str(uuid.uuid4())
     otp_code = email_verification.generate_otp_code()
@@ -145,6 +167,7 @@ async def register(
         "email": user_create.email,
         "password_hash": password_hash,
         "otp": otp_code,
+        "attempts": 0,
     }
     await redis_client.setex(f"pending_registration:{pending_id}", 600, json.dumps(pending_data))
     await redis_client.setex(f"pending_email:{user_create.email}", 600, pending_id)
@@ -188,8 +211,22 @@ async def verify_registration(
 
     pending_data = json.loads(pending_data_str)
 
-    if pending_data["otp"] != payload.otp:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code.")
+    if pending_data.get("otp") != payload.otp:
+        attempts = pending_data.get("attempts", 0) + 1
+        pending_data["attempts"] = attempts
+        if attempts >= 5:
+            await redis_client.delete(pending_key)
+            await redis_client.delete(f"pending_email:{pending_data['email']}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many incorrect attempts. This verification code has been invalidated. Please register again."
+            )
+        await redis_client.setex(pending_key, 600, json.dumps(pending_data))
+        remaining = 5 - attempts
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid verification code. {remaining} attempt(s) remaining."
+        )
 
     existing_user = db.query(User).filter(User.email == pending_data["email"]).first()
     if existing_user:
@@ -244,8 +281,13 @@ async def resend_otp(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found or expired.")
 
     pending_data = json.loads(pending_data_str)
+    
+    # Enforce per-email rate limit to cap Azure email costs
+    await check_email_otp_rate_limit(redis_client, pending_data["email"])
+    
     new_otp = email_verification.generate_otp_code()
     pending_data["otp"] = new_otp
+    pending_data["attempts"] = 0
 
     # Store updated registration data and reset the TTL to 10 minutes
     await redis_client.setex(pending_key, 600, json.dumps(pending_data))
@@ -524,19 +566,27 @@ async def forgot_password(
 ):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        # Prevent user enumeration with generic success message
+        return {"message": "If an account exists with this email, a password reset code has been sent."}
+
+    # Enforce per-email rate limit to cap Azure email costs
+    await check_email_otp_rate_limit(redis_client, payload.email)
 
     otp_code = email_verification.generate_otp_code()
     
-    # Store verification OTP in Redis instead of the database model
+    # Store verification OTP and attempts in Redis
     reset_key = f"reset_password_otp:{payload.email}"
-    await redis_client.setex(reset_key, 600, otp_code)
+    reset_data = {
+        "otp": otp_code,
+        "attempts": 0
+    }
+    await redis_client.setex(reset_key, 600, json.dumps(reset_data))
 
     subject = "Reset your College Connect password"
     html_body = (
         f"<p>Hi,</p>"
         f"<p>Your password reset code is <strong>{otp_code}</strong>.</p>"
-        f"<p>Enter this code in the resetting your password.</p>"
+        f"<p>Enter this code in the app to reset your password.</p>"
         f"<p>If you did not request this, ignore this message.</p>"
     )
     plain_body = (
@@ -554,7 +604,7 @@ async def forgot_password(
         plain_body=plain_body
     )
 
-    return {"message": "Password reset code sent to your email."}
+    return {"message": "If an account exists with this email, a password reset code has been sent."}
 
 
 @router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
@@ -568,9 +618,34 @@ async def reset_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     reset_key = f"reset_password_otp:{payload.email}"
-    stored_otp = await redis_client.get(reset_key)
-    if not stored_otp or stored_otp != payload.otp:
+    raw_data = await redis_client.get(reset_key)
+    if not raw_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset code.")
+
+    try:
+        data = json.loads(raw_data)
+        correct_otp = data.get("otp")
+        attempts = data.get("attempts", 0)
+    except Exception:
+        correct_otp = raw_data
+        attempts = 0
+        data = {"otp": correct_otp, "attempts": 0}
+
+    if correct_otp != payload.otp:
+        attempts += 1
+        data["attempts"] = attempts
+        if attempts >= 5:
+            await redis_client.delete(reset_key)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many incorrect attempts. This reset code has been invalidated. Please request a new code."
+            )
+        await redis_client.setex(reset_key, 600, json.dumps(data))
+        remaining = 5 - attempts
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid reset code. {remaining} attempt(s) remaining."
+        )
 
     if len(payload.new_password.encode("utf-8")) > 72:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be 72 bytes or fewer.")

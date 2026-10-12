@@ -11,7 +11,11 @@ if database_url is None:
 if database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 
-engine = create_engine(database_url, connect_args=connect_args)
+engine_kwargs = {"connect_args": connect_args}
+if not database_url.startswith("sqlite"):
+    engine_kwargs.update({"pool_pre_ping": True, "pool_recycle": 300})
+
+engine = create_engine(database_url, **engine_kwargs)
 
 # Add new column for profile image if it doesn't exist (ignore errors if already present)
 try:

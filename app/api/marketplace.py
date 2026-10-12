@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
 from app.schemas.marketplace import MarketplaceItemCreate
+from app.core.azure_storage import delete_blob_from_url
 
 router = APIRouter()
 
@@ -256,8 +257,13 @@ async def delete_marketplace_item(
     if item.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this item")
     
+    image_url = item.image_url
+    
     db.delete(item)
     db.commit()
+    
+    if image_url:
+        await run_in_threadpool(delete_blob_from_url, image_url)
     
     redis = redis_service.get_client()
     try:
