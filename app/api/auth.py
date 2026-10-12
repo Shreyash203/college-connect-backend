@@ -347,6 +347,22 @@ async def google_login(
     if not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
 
+    # Security check: Ensure token was issued specifically for College Connect
+    token_aud = id_info.get("aud")
+    if token_aud != settings.GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token audience: Token was not issued for College Connect."
+        )
+
+    # Security check: Ensure Google has verified ownership of this email address
+    email_verified = id_info.get("email_verified")
+    if email_verified not in (True, "true", "True"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google email address has not been verified."
+        )
+
     domain = email.split("@")[-1].lower() if "@" in email else ""
     is_admin_email = email.lower() in settings.admin_emails_list
     

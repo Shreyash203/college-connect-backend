@@ -10,6 +10,7 @@ from app.core.dependencies import get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import User, StudentProfile, Conversation, Message, Notification
 from app.schemas.chat import ConversationRead, MessageRead
+from app.db.session import SessionLocal
 from app.core.redis import get_redis
 
 router = APIRouter()
@@ -107,23 +108,39 @@ def list_messages(
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, List[WebSocket]] = {}
+        self.user_tasks: dict[int, asyncio.Task] = {}
 
     async def connect(self, user_id: int, websocket: WebSocket):
         await websocket.accept()
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
+        
+        # Start a single Redis listener task for this user if not already running
+        if user_id not in self.user_tasks or self.user_tasks[user_id].done():
+            self.user_tasks[user_id] = asyncio.create_task(redis_listener(user_id))
 
     def disconnect(self, user_id: int, websocket: WebSocket):
         if user_id in self.active_connections:
-            self.active_connections[user_id].remove(websocket)
+            if websocket in self.active_connections[user_id]:
+                self.active_connections[user_id].remove(websocket)
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
+                # Cancel the single Redis task when no active sockets remain for this user
+                task = self.user_tasks.pop(user_id, None)
+                if task and not task.done():
+                    task.cancel()
 
     async def send_personal_message(self, message_json: str, user_id: int):
         if user_id in self.active_connections:
+            dead_connections = []
             for connection in self.active_connections[user_id]:
-                await connection.send_text(message_json)
+                try:
+                    await connection.send_text(message_json)
+                except Exception:
+                    dead_connections.append(connection)
+            for dead in dead_connections:
+                self.disconnect(user_id, dead)
 
 manager = ConnectionManager()
 
@@ -136,29 +153,36 @@ async def redis_listener(user_id: int):
         async for message in pubsub.listen():
             if message["type"] == "message":
                 await manager.send_personal_message(message["data"], user_id)
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
         print(f"Redis listener error for user {user_id}: {e}")
     finally:
-        await pubsub.unsubscribe(channel_name)
-        await pubsub.close()
+        try:
+            await pubsub.unsubscribe(channel_name)
+            await pubsub.close()
+        except Exception:
+            pass
 
 @router.websocket("/ws/chat")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         user_id = payload.get("sub")
         token_type = payload.get("type")
         if user_id is None or token_type != "access":
             raise ValueError("Invalid token")
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if not user:
-            raise ValueError("User not found")
+        
+        with SessionLocal() as db:
+            user = db.query(User).filter(User.id == int(user_id)).first()
+            if not user:
+                raise ValueError("User not found")
+            user_auth_id = user.id
     except Exception:
         await websocket.close(code=1008)
         return
         
-    await manager.connect(user.id, websocket)
-    redis_task = asyncio.create_task(redis_listener(user.id))
+    await manager.connect(user_auth_id, websocket)
     redis_client = await get_redis()
     
     try:
@@ -172,58 +196,59 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
             payload = json.loads(data)
             content = payload.get("content", "").strip()
             conversation_id = payload.get("conversation_id")
-            target_user_id = payload.get("target_user_id")
             
             if not content or len(content) > 1000:
                 await websocket.send_text(json.dumps({"error": "Content invalid or exceeds 1000 characters"}))
                 continue
                 
-            conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-            if not conv or (conv.user1_id != user.id and conv.user2_id != user.id):
-                continue
+            with SessionLocal() as db:
+                conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+                if not conv or (conv.user1_id != user_auth_id and conv.user2_id != user_auth_id):
+                    continue
                 
-            msg = Message(conversation_id=conversation_id, sender_id=user.id, content=content)
-            db.add(msg)
-            conv.updated_at = msg.created_at
-            db.commit()
-            db.refresh(msg)
-            
-            # Send Notification to target user (avoiding spam if they already have an unread one from this user)
-            sender_profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
-            sender_name = sender_profile.display_name if sender_profile else "Someone"
-            
-            existing_notif = db.query(Notification).filter(
-                Notification.user_id == target_user_id,
-                Notification.is_read == False,
-                Notification.message == f"You have a new message from {sender_name} 💬"
-            ).first()
-            
-            if not existing_notif:
-                notif = Notification(
-                    user_id=target_user_id,
-                    message=f"You have a new message from {sender_name} 💬",
-                    link=f"/messages?conversationId={conversation_id}"
-                )
-                db.add(notif)
+                # Derive recipient safely from conversation
+                target_user_id = conv.user2_id if conv.user1_id == user_auth_id else conv.user1_id
+                
+                msg = Message(conversation_id=conversation_id, sender_id=user_auth_id, content=content)
+                db.add(msg)
+                conv.updated_at = msg.created_at
                 db.commit()
+                db.refresh(msg)
+                
+                # Send Notification to target user
+                sender_profile = db.query(StudentProfile).filter(StudentProfile.user_id == user_auth_id).first()
+                sender_name = sender_profile.display_name if sender_profile else "Someone"
+                
+                existing_notif = db.query(Notification).filter(
+                    Notification.user_id == target_user_id,
+                    Notification.is_read == False,
+                    Notification.message == f"You have a new message from {sender_name} 💬"
+                ).first()
+                
+                if not existing_notif:
+                    notif = Notification(
+                        user_id=target_user_id,
+                        message=f"You have a new message from {sender_name} 💬",
+                        link=f"/messages?conversationId={conversation_id}"
+                    )
+                    db.add(notif)
+                    db.commit()
+                
+                msg_data = {
+                    "id": msg.id,
+                    "conversation_id": msg.conversation_id,
+                    "sender_id": msg.sender_id,
+                    "content": msg.content,
+                    "is_read": msg.is_read,
+                    "created_at": msg.created_at.isoformat() + "Z"
+                }
             
-            msg_data = {
-                "id": msg.id,
-                "conversation_id": msg.conversation_id,
-                "sender_id": msg.sender_id,
-                "content": msg.content,
-                "is_read": msg.is_read,
-                "created_at": msg.created_at.isoformat() + "Z"
-            }
             msg_json = json.dumps(msg_data)
-            
             await redis_client.publish(f"chat:{target_user_id}", msg_json)
-            await redis_client.publish(f"chat:{user.id}", msg_json)
+            await redis_client.publish(f"chat:{user_auth_id}", msg_json)
 
     except WebSocketDisconnect:
-        manager.disconnect(user.id, websocket)
-        redis_task.cancel()
+        manager.disconnect(user_auth_id, websocket)
     except Exception as e:
-        manager.disconnect(user.id, websocket)
-        redis_task.cancel()
+        manager.disconnect(user_auth_id, websocket)
         print(f"WS Error: {e}")
