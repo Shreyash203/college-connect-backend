@@ -86,6 +86,13 @@ async def create_marketplace_item(
             detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
         )
 
+    if item_in.image_url:
+        if not (item_in.image_url.startswith("https://") and ".blob.core.windows.net/" in item_in.image_url):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image URL. Images must be hosted on Azure Blob Storage."
+            )
+
     item = MarketplaceItem(
         user_id=current_user.id,
         title=item_in.title,

@@ -3,7 +3,7 @@ import asyncio
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_, desc
+from sqlalchemy import or_, and_, desc, func
 from jose import JWTError, jwt
 from app.core.config import settings
 from app.core.dependencies import get_db
@@ -56,18 +56,45 @@ def list_conversations(current_user: User = Depends(get_current_verified_user), 
         or_(Conversation.user1_id == current_user.id, Conversation.user2_id == current_user.id)
     ).order_by(desc(Conversation.updated_at)).all()
     
+    if not convs:
+        return []
+        
+    conv_ids = [c.id for c in convs]
+    other_ids = list({c.user2_id if c.user1_id == current_user.id else c.user1_id for c in convs})
+    
+    # 1. Batch fetch all participant profiles
+    profiles = {
+        p.user_id: p for p in db.query(StudentProfile).filter(StudentProfile.user_id.in_(other_ids)).all()
+    } if other_ids else {}
+    
+    # 2. Batch fetch unread counts grouped by conversation
+    unread_counts = dict(
+        db.query(Message.conversation_id, func.count(Message.id))
+        .filter(
+            Message.conversation_id.in_(conv_ids),
+            Message.sender_id != current_user.id,
+            Message.is_read == False
+        )
+        .group_by(Message.conversation_id)
+        .all()
+    ) if conv_ids else {}
+    
+    # 3. Batch fetch latest message for each conversation
+    latest_msg_ids_subq = (
+        db.query(func.max(Message.id).label("max_id"))
+        .filter(Message.conversation_id.in_(conv_ids))
+        .group_by(Message.conversation_id)
+        .subquery()
+    )
+    latest_messages = {
+        m.conversation_id: m.content
+        for m in db.query(Message).filter(Message.id.in_(db.query(latest_msg_ids_subq.c.max_id))).all()
+    } if conv_ids else {}
+    
     res = []
     for c in convs:
         other_id = c.user2_id if c.user1_id == current_user.id else c.user1_id
-        other_profile = db.query(StudentProfile).filter(StudentProfile.user_id == other_id).first()
-        
-        last_msg = db.query(Message).filter(Message.conversation_id == c.id).order_by(desc(Message.created_at)).first()
-        
-        unread_count = db.query(Message).filter(
-            Message.conversation_id == c.id, 
-            Message.sender_id == other_id, 
-            Message.is_read == False
-        ).count()
+        other_profile = profiles.get(other_id)
         
         res.append(ConversationRead(
             id=c.id,
@@ -78,8 +105,8 @@ def list_conversations(current_user: User = Depends(get_current_verified_user), 
             other_user_id=other_id,
             other_user_name=other_profile.display_name if other_profile else "Unknown",
             other_user_image=other_profile.image_url if other_profile else None,
-            last_message=last_msg.content if last_msg else None,
-            unread_count=unread_count
+            last_message=latest_messages.get(c.id),
+            unread_count=unread_counts.get(c.id, 0)
         ))
     return res
 

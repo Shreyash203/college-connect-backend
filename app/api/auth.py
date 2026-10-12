@@ -319,7 +319,7 @@ async def resend_otp(
 
 
 @router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
-async def login(
+def login(
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
@@ -360,7 +360,7 @@ async def login(
 import requests as http_requests
 
 @router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
-async def google_login(
+def google_login(
     payload: GoogleLoginRequest, 
     response: Response,
     db: Session = Depends(get_db)
@@ -472,7 +472,7 @@ async def google_login(
 
 
 @router.post("/auth/refresh")
-async def refresh_token(
+def refresh_token(
     response: Response,
     refresh_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db)
