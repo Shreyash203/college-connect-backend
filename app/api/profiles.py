@@ -2,10 +2,11 @@ from typing import List
 from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
-import imghdr
+import re
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 
 from app.core.dependencies import get_db
@@ -14,8 +15,19 @@ from app.db.models import StudentProfile, Interest, User
 from app.schemas.profiles import ProfileCreate, ProfileRead, ImageUpdate
 from app.core.config import settings
 from app.core.rate_limiter import DailyUploadRateLimiter
+from fastapi.concurrency import run_in_threadpool
+from app.core.azure_storage import verify_azure_host_and_container
 
 router = APIRouter()
+
+MAX_PROFILE_IMAGE_SIZE = 10 * 1024 * 1024
+PROFILE_IMAGE_READ_SAS_DAYS = 36500
+PROFILE_IMAGE_BLOB_PATTERN = re.compile(
+    r"^profile_images/user_(\d+)/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"\.(jpg|jpeg|png|gif|webp|svg)$",
+    re.IGNORECASE,
+)
 
 
 def profile_to_response(profile: StudentProfile) -> dict:
@@ -32,6 +44,28 @@ def profile_to_response(profile: StudentProfile) -> dict:
         "prompts": profile.prompts or [],
         "interests": [interest.name for interest in profile.interests],
     }
+
+
+def get_owned_profile_blob_name(image_url: str, owner_user_id: int) -> str:
+    verification = verify_azure_host_and_container(image_url)
+    if not verification:
+        raise HTTPException(status_code=400, detail="Invalid profile image URL.")
+
+    _, blob_name = verification
+    match = PROFILE_IMAGE_BLOB_PATTERN.fullmatch(blob_name)
+    if not match or int(match.group(1)) != owner_user_id:
+        raise HTTPException(status_code=400, detail="Profile image does not belong to this account.")
+    return blob_name
+
+
+def enforce_profile_blob_size(blob_client) -> None:
+    properties = blob_client.get_blob_properties()
+    if properties.size > MAX_PROFILE_IMAGE_SIZE:
+        blob_client.delete_blob()
+        raise HTTPException(
+            status_code=413,
+            detail="Profile images must be 10 MB or smaller. The oversized upload was deleted.",
+        )
 
 
 def validate_image_url(image_url: str) -> bool:
@@ -204,18 +238,18 @@ def list_profiles(
     return [profile_to_response(profile) for profile in profiles]
 
 
-@router.get("/profiles/me/upload-url", response_model=dict)
+@router.get(
+    "/profiles/me/upload-url",
+    response_model=dict,
+    dependencies=[Depends(DailyUploadRateLimiter(limit=3))],
+)
 def get_profile_upload_url(
     filename: str,
     current_user: User = Depends(get_current_verified_user),
 ):
-    # Apply rate limiting (3 uploads per day)
-    daily_limiter = DailyUploadRateLimiter(limit=3)
-    
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
     
-    # Validate filename extension
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'}
     ext = Path(filename).suffix.lower()
     if ext not in allowed_extensions:
@@ -227,36 +261,64 @@ def get_profile_upload_url(
     if not account_name or not account_key:
         raise HTTPException(status_code=500, detail="Invalid storage connection string.")
 
-    blob_name = f"profile_images/{uuid.uuid4()}{ext}"
-    
+    blob_name = f"profile_images/user_{current_user.id}/{uuid.uuid4()}{ext}"
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
-    # We assume the container already exists and has the correct access policy.
-    # Calling create_container() on every upload causes severe latency and potential timeouts.
+    blob_client = container_client.get_blob_client(blob_name)
 
-    # Generate upload SAS token with WRITE and CREATE permissions (1 hour expiry)
     upload_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
         blob_name=blob_name,
         account_key=account_key,
-        permission=BlobSasPermissions(write=True, create=True),
+        permission=BlobSasPermissions(create=True),
         expiry=datetime.utcnow() + timedelta(hours=1),
     )
-    upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
-    
-    # Generate read-only SAS token for viewing (30 days) to bypass strict Azure public access blocks
     read_sas_token = generate_blob_sas(
         account_name=account_name,
         container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
         blob_name=blob_name,
         account_key=account_key,
         permission=BlobSasPermissions(read=True),
-        expiry=datetime.utcnow() + timedelta(days=36500), # 100 years to prevent expiration
+        expiry=datetime.utcnow() + timedelta(days=PROFILE_IMAGE_READ_SAS_DAYS),
     )
+    upload_url = f"{blob_client.url}?{upload_sas_token}"
     image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
-    
     return {"upload_url": upload_url, "image_url": image_url}
+
+
+@router.post("/profiles/me/upload/verify", response_model=dict)
+async def verify_profile_upload(
+    image_in: ImageUpdate,
+    current_user: User = Depends(get_current_verified_user),
+):
+    if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
+        raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
+
+    blob_name = get_owned_profile_blob_name(image_in.image_url, current_user.id)
+    blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+    container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
+    blob_client = container_client.get_blob_client(blob_name)
+    try:
+        await run_in_threadpool(enforce_profile_blob_size, blob_client)
+    except ResourceNotFoundError as exc:
+        raise HTTPException(status_code=400, detail="Profile image upload was not found.") from exc
+
+    parts = dict(item.split('=', 1) for item in settings.AZURE_STORAGE_CONNECTION_STRING.split(';') if item)
+    account_name = parts.get('AccountName')
+    account_key = parts.get('AccountKey')
+    if not account_name or not account_key:
+        raise HTTPException(status_code=500, detail="Invalid storage connection string.")
+
+    read_sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=settings.AZURE_STORAGE_CONTAINER_NAME,
+        blob_name=blob_name,
+        account_key=account_key,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(days=PROFILE_IMAGE_READ_SAS_DAYS),
+    )
+    return {"image_url": f"{container_client.url}/{blob_name}?{read_sas_token}"}
 
 @router.post("/profiles/me/image", response_model=dict)
 def update_profile_image(
