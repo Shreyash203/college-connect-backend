@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 from app.core.redis import redis_service
 from app.db.session import SessionLocal
 from app.db.models import Confession, MarketplaceItem, ConfessionLike, MarketplaceInterest
-from app.core.azure_storage import delete_blob_from_url
+from app.core.azure_storage import delete_marketplace_blob
 
 async def purge_expired_confessions_loop():
     while True:
@@ -52,7 +52,7 @@ async def purge_expired_confessions_loop():
                     # Clean up orphaned images from Azure Blob Storage
                     for item in expired_items:
                         if item.image_url:
-                            delete_blob_from_url(item.image_url)
+                            delete_marketplace_blob(item.image_url, owner_user_id=item.user_id)
                     
                     db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(expired_item_ids)).delete(synchronize_session=False)
                     db.query(MarketplaceItem).filter(MarketplaceItem.id.in_(expired_item_ids)).delete(synchronize_session=False)

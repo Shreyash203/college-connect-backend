@@ -17,7 +17,10 @@ from pathlib import Path
 import uuid
 from app.schemas.marketplace import MarketplaceItemCreate
 import re as _re
-from app.core.azure_storage import delete_blob_from_url, delete_marketplace_blob
+from app.core.azure_storage import (
+    delete_marketplace_blob,
+    verify_azure_host_and_container,
+)
 
 router = APIRouter()
 
@@ -41,7 +44,7 @@ def get_marketplace_upload_url(
     if not account_name or not account_key:
         raise HTTPException(status_code=500, detail="Invalid storage connection string.")
 
-    blob_name = f"marketplace_images/{uuid.uuid4()}{ext}"
+    blob_name = f"marketplace_images/user_{current_user.id}/{uuid.uuid4()}{ext}"
     
     # Ensure container exists and is publicly accessible
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
@@ -87,22 +90,36 @@ async def create_marketplace_item(
             detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
         )
 
-    # Validate that the image URL genuinely points to a marketplace blob that
-    # this server generated (marketplace_images/<uuid>.<ext> pattern).
-    # This prevents a user from submitting another user's blob URL and later
-    # triggering its deletion through the delete endpoint.
-    _MARKETPLACE_URL_RE = _re.compile(
-        r"^https://[^/]+\.blob\.core\.windows\.net/[^/]+"
-        r"/marketplace_images/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-        r"\.(jpg|jpeg|png|gif|webp|svg)(\?.*)?$",
-        _re.IGNORECASE,
-    )
+    # Validate that the image genuinely belongs to this user on the configured Azure storage container.
+    # This prevents attaching another user's image blob or cross-container blobs.
     if item_in.image_url:
-        if not _MARKETPLACE_URL_RE.match(item_in.image_url):
+        verification = verify_azure_host_and_container(item_in.image_url)
+        if not verification:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid image URL. Please upload your image using the provided upload endpoint.",
+                detail="Invalid image URL. Images must be hosted on the configured Azure Blob Storage container.",
             )
+
+        _, blob_name_clean = verification
+        user_prefix_pattern = (
+            rf"^marketplace_images/user_{current_user.id}/"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+            r"\.(jpg|jpeg|png|gif|webp|svg)$"
+        )
+        if not _re.match(user_prefix_pattern, blob_name_clean, _re.IGNORECASE):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image URL. The image does not belong to your account.",
+            )
+
+        # Ensure the image is not already in use by another active marketplace listing
+        existing_image = db.query(MarketplaceItem).filter(MarketplaceItem.image_url == item_in.image_url).first()
+        if existing_image:
+            raise HTTPException(
+                status_code=400,
+                detail="This image has already been attached to another marketplace listing.",
+            )
+
 
 
     item = MarketplaceItem(
@@ -282,7 +299,7 @@ async def delete_marketplace_item(
     db.commit()
     
     if image_url:
-        await run_in_threadpool(delete_marketplace_blob, image_url)
+        await run_in_threadpool(delete_marketplace_blob, image_url, item.user_id)
     
     redis = redis_service.get_client()
     try:
