@@ -6,20 +6,23 @@ from app.db.session import engine
 from app.db.models import Base
 from app.db.schema_sync import sync_auth_schema
 
+from sqlalchemy import text
+
 Base.metadata.create_all(bind=engine)
 
-# Ensure image_url column exists for existing tables
-try:
-    with engine.begin() as conn:
-        conn.execute("ALTER TABLE student_profiles ADD COLUMN image_url VARCHAR(255) NULL;")
-except Exception:
-    pass
+# Ensure columns exist for existing tables
+for stmt in [
+    "ALTER TABLE student_profiles ADD COLUMN image_url VARCHAR(255) NULL;",
+    "ALTER TABLE student_profiles ADD COLUMN vibe_photos JSON NULL;",
+    "ALTER TABLE student_profiles ADD COLUMN prompts JSON NULL;",
+    "ALTER TABLE marketplace_items ADD COLUMN image_url VARCHAR(255) NULL;",
+]:
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(stmt))
+    except Exception:
+        pass
 
-try:
-    with engine.begin() as conn:
-        conn.execute("ALTER TABLE marketplace_items ADD COLUMN image_url VARCHAR(255) NULL;")
-except Exception:
-    pass
 sync_auth_schema(engine)
 
 import asyncio

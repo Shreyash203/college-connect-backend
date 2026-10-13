@@ -28,6 +28,8 @@ def profile_to_response(profile: StudentProfile) -> dict:
         "year": profile.year,
         "bio": profile.bio,
         "image_url": profile.image_url,
+        "vibe_photos": profile.vibe_photos or [],
+        "prompts": profile.prompts or [],
         "interests": [interest.name for interest in profile.interests],
     }
 
@@ -78,6 +80,8 @@ def create_profile(
         year=profile_in.year,
         bio=profile_in.bio,
         image_url=profile_in.image_url,
+        vibe_photos=profile_in.vibe_photos or [],
+        prompts=profile_in.prompts or [],
     )
     db.add(profile)
     db.commit()
@@ -116,6 +120,10 @@ def update_profile(
     profile.bio = profile_in.bio
     if profile_in.image_url:
         profile.image_url = profile_in.image_url
+    if profile_in.vibe_photos is not None:
+        profile.vibe_photos = profile_in.vibe_photos
+    if profile_in.prompts is not None:
+        profile.prompts = profile_in.prompts
 
     # Update interests
     new_interests = []
@@ -143,7 +151,10 @@ def get_my_profile(current_user: User = Depends(get_current_verified_user), db: 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileRead)
 def get_profile(profile_id: int, db: Session = Depends(get_db)):
-    profile = db.query(StudentProfile).filter(StudentProfile.id == profile_id).first()
+    from sqlalchemy import or_
+    profile = db.query(StudentProfile).filter(
+        or_(StudentProfile.id == profile_id, StudentProfile.user_id == profile_id)
+    ).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile_to_response(profile)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, JSON
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -46,6 +46,8 @@ class StudentProfile(Base):
     department = Column(String(100), nullable=True)
     year = Column(String(50), nullable=True)
     bio = Column(String(1000), nullable=True)
+    vibe_photos = Column(JSON, nullable=True)  # List of up to 2 extra image URLs
+    prompts = Column(JSON, nullable=True)  # List of {"question": str, "answer": str}
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="profile")
