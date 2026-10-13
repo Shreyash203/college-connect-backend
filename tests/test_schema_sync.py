@@ -10,7 +10,7 @@ from app.db.schema_sync import sync_auth_schema
 
 
 class SchemaSyncTests(unittest.TestCase):
-    def test_sync_auth_schema_adds_missing_reset_password_columns(self):
+    def test_sync_auth_schema_does_not_restore_redis_managed_otp_columns(self):
         db_fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)
 
@@ -42,8 +42,8 @@ class SchemaSyncTests(unittest.TestCase):
                     for row in db_connection.execute(text("PRAGMA table_info('users')")).fetchall()
                 }
 
-            self.assertIn("reset_password_otp", columns)
-            self.assertIn("reset_password_otp_expires_at", columns)
+            self.assertNotIn("reset_password_otp", columns)
+            self.assertNotIn("reset_password_otp_expires_at", columns)
         finally:
             try:
                 engine.dispose()

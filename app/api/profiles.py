@@ -150,7 +150,11 @@ def get_my_profile(current_user: User = Depends(get_current_verified_user), db: 
 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileRead)
-def get_profile(profile_id: int, db: Session = Depends(get_db)):
+def get_profile(
+    profile_id: int,
+    current_user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db),
+):
     from sqlalchemy import or_
     profile = db.query(StudentProfile).filter(
         or_(StudentProfile.id == profile_id, StudentProfile.user_id == profile_id)
