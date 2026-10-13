@@ -16,7 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
 from app.schemas.marketplace import MarketplaceItemCreate
-from app.core.azure_storage import delete_blob_from_url
+import re as _re
+from app.core.azure_storage import delete_blob_from_url, delete_marketplace_blob
 
 router = APIRouter()
 
@@ -86,12 +87,23 @@ async def create_marketplace_item(
             detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
         )
 
+    # Validate that the image URL genuinely points to a marketplace blob that
+    # this server generated (marketplace_images/<uuid>.<ext> pattern).
+    # This prevents a user from submitting another user's blob URL and later
+    # triggering its deletion through the delete endpoint.
+    _MARKETPLACE_URL_RE = _re.compile(
+        r"^https://[^/]+\.blob\.core\.windows\.net/[^/]+"
+        r"/marketplace_images/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        r"\.(jpg|jpeg|png|gif|webp|svg)(\?.*)?$",
+        _re.IGNORECASE,
+    )
     if item_in.image_url:
-        if not (item_in.image_url.startswith("https://") and ".blob.core.windows.net/" in item_in.image_url):
+        if not _MARKETPLACE_URL_RE.match(item_in.image_url):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid image URL. Images must be hosted on Azure Blob Storage."
+                detail="Invalid image URL. Please upload your image using the provided upload endpoint.",
             )
+
 
     item = MarketplaceItem(
         user_id=current_user.id,
@@ -270,7 +282,7 @@ async def delete_marketplace_item(
     db.commit()
     
     if image_url:
-        await run_in_threadpool(delete_blob_from_url, image_url)
+        await run_in_threadpool(delete_marketplace_blob, image_url)
     
     redis = redis_service.get_client()
     try:
