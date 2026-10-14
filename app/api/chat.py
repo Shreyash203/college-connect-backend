@@ -4,9 +4,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, desc, func
-from jose import JWTError, jwt
-from app.core.config import settings
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, decode_access_token, get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import User, StudentProfile, Conversation, Message, Notification
 from app.schemas.chat import ConversationRead, MessageRead
@@ -16,7 +14,7 @@ from app.core.redis import get_redis
 router = APIRouter()
 
 @router.post("/chat/start/{target_user_id}", response_model=ConversationRead)
-def start_conversation(target_user_id: int, current_user: User = Depends(get_current_verified_user), db: Session = Depends(get_db)):
+def start_conversation(target_user_id: int, current_user: AuthenticatedUser = Depends(get_current_verified_user), db: Session = Depends(get_db)):
     if target_user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot chat with yourself.")
         
@@ -51,7 +49,7 @@ def start_conversation(target_user_id: int, current_user: User = Depends(get_cur
     )
 
 @router.get("/chat/conversations", response_model=List[ConversationRead])
-def list_conversations(current_user: User = Depends(get_current_verified_user), db: Session = Depends(get_db)):
+def list_conversations(current_user: AuthenticatedUser = Depends(get_current_verified_user), db: Session = Depends(get_db)):
     convs = db.query(Conversation).filter(
         or_(Conversation.user1_id == current_user.id, Conversation.user2_id == current_user.id)
     ).order_by(desc(Conversation.updated_at)).all()
@@ -115,7 +113,7 @@ def list_messages(
     conversation_id: int, 
     skip: int = 0, 
     limit: int = 50, 
-    current_user: User = Depends(get_current_verified_user), 
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
@@ -194,17 +192,7 @@ async def redis_listener(user_id: int):
 @router.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id = payload.get("sub")
-        token_type = payload.get("type")
-        if user_id is None or token_type != "access":
-            raise ValueError("Invalid token")
-        
-        with SessionLocal() as db:
-            user = db.query(User).filter(User.id == int(user_id)).first()
-            if not user:
-                raise ValueError("User not found")
-            user_auth_id = user.id
+        user_auth_id = decode_access_token(token).id
     except Exception:
         await websocket.close(code=1008)
         return

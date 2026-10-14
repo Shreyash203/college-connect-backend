@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import StudentProfile, Interest, User
 from app.schemas.profiles import ProfileCreate, ProfileRead, ImageUpdate
@@ -100,7 +100,7 @@ def validate_image_size_from_url(image_url: str) -> bool:
 @router.post("/profiles", response_model=ProfileRead)
 def create_profile(
     profile_in: ProfileCreate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     existing = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
@@ -140,7 +140,7 @@ def create_profile(
 @router.put("/profiles/me", response_model=ProfileRead)
 def update_profile(
     profile_in: ProfileCreate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
@@ -176,7 +176,7 @@ def update_profile(
 
 
 @router.get("/profiles/me", response_model=ProfileRead)
-def get_my_profile(current_user: User = Depends(get_current_verified_user), db: Session = Depends(get_db)):
+def get_my_profile(current_user: AuthenticatedUser = Depends(get_current_verified_user), db: Session = Depends(get_db)):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -186,7 +186,7 @@ def get_my_profile(current_user: User = Depends(get_current_verified_user), db: 
 @router.get("/profiles/{profile_id}", response_model=ProfileRead)
 def get_profile(
     profile_id: int,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     from sqlalchemy import or_
@@ -204,7 +204,7 @@ def list_profiles(
     skip: int = 0, 
     limit: int = 20, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     from sqlalchemy import cast, Integer
 
@@ -220,7 +220,7 @@ def list_profiles(
         query = query.filter(User.college_domain == current_domain)
 
     if category:
-        my_profile = current_user.profile
+        my_profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
         if not my_profile:
             return []  # User needs a profile to use smart filters
             
@@ -245,7 +245,7 @@ def list_profiles(
 )
 def get_profile_upload_url(
     filename: str,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
 ):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
@@ -290,7 +290,7 @@ def get_profile_upload_url(
 @router.post("/profiles/me/upload/verify", response_model=dict)
 async def verify_profile_upload(
     image_in: ImageUpdate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
 ):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
@@ -323,7 +323,7 @@ async def verify_profile_upload(
 @router.post("/profiles/me/image", response_model=dict)
 def update_profile_image(
     image_in: ImageUpdate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()

@@ -6,7 +6,7 @@ from fastapi.concurrency import run_in_threadpool
 from app.core.redis import redis_service
 import json
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.db.models import User, Confession, ConfessionLike, Notification
 from app.schemas.intercollege import ConfessionCreate, ConfessionRead
 from app.core.verified_dependencies import get_current_verified_user
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/confessions", tags=["Confessions"])
 async def create_confession(
     confession_in: ConfessionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     # User-based rate limiter: max 3 confessions per hour
     cutoff = datetime.utcnow() - timedelta(hours=1)
@@ -71,7 +71,7 @@ async def get_all_confessions(
     limit: int = 20,
     scope: str = "global",
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     if scope == "college" and current_user.college_domain:
         cache_key = f"cache:confessions:college:{current_user.college_domain}:{skip}:{limit}"
@@ -160,7 +160,7 @@ async def get_all_confessions(
 async def get_confession(
     confession_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     """Fetch a single confession (used when opening a post from a notification)."""
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
@@ -197,7 +197,7 @@ async def get_confession(
 async def toggle_like(
     confession_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
     if not confession:
@@ -234,7 +234,7 @@ async def toggle_like(
 async def delete_confession(
     confession_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
     if not confession:

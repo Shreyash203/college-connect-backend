@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 
-from app.core.dependencies import get_db
-from app.db.models import User, Notification
+from app.core.dependencies import AuthenticatedUser, get_db
+from app.db.models import Notification
 from app.schemas.notifications import NotificationRead
 from app.core.verified_dependencies import get_current_verified_user
 
@@ -16,7 +16,7 @@ router = APIRouter(
 def get_notifications(
     skip: int = 0,
     limit: int = 20,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     notifications = db.query(Notification).filter(Notification.user_id == current_user.id).order_by(Notification.created_at.desc()).offset(skip).limit(limit).all()
@@ -25,7 +25,7 @@ def get_notifications(
 @router.put("/{notification_id}/read")
 def mark_as_read(
     notification_id: int,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     notification = db.query(Notification).filter(
@@ -42,7 +42,7 @@ def mark_as_read(
 
 @router.get("/unread-count")
 def get_unread_count(
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     count = db.query(Notification).filter(
@@ -53,7 +53,7 @@ def get_unread_count(
 
 @router.put("/mark-all-read")
 def mark_all_as_read(
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     db.query(Notification).filter(
@@ -65,7 +65,7 @@ def mark_all_as_read(
 
 @router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
 def clear_all_notifications(
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db)
 ):
     db.query(Notification).filter(Notification.user_id == current_user.id).delete()

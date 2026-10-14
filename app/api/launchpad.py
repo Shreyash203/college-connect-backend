@@ -6,7 +6,7 @@ from fastapi.concurrency import run_in_threadpool
 from app.core.redis import redis_service
 import json
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.db.models import User, StudentApp
 from app.schemas.intercollege import StudentAppCreate, StudentAppRead
 from app.core.verified_dependencies import get_current_verified_user
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/launchpad", tags=["Launchpad"])
 def create_app(
     app_in: StudentAppCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     existing_app = db.query(StudentApp).filter(StudentApp.user_id == current_user.id).first()
     if existing_app:
@@ -58,7 +58,7 @@ async def get_all_apps(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     cache_key = f"cache:launchpad:{skip}:{limit}"
     redis = redis_service.get_client()
@@ -125,7 +125,7 @@ async def get_all_apps(
 def delete_app(
     app_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     student_app = db.query(StudentApp).filter(StudentApp.id == app_id).first()
     if not student_app:

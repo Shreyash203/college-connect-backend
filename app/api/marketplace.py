@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import MarketplaceItem, User, MarketplaceInterest, Notification
 from app.core.config import settings
@@ -27,7 +27,7 @@ router = APIRouter()
 @router.get("/marketplace/items/upload-url", response_model=dict, dependencies=[Depends(DailyUploadRateLimiter(limit=20))])
 def get_marketplace_upload_url(
     filename: str,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
 ):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
@@ -79,7 +79,7 @@ def get_marketplace_upload_url(
 @router.post("/marketplace/items", response_model=dict)
 async def create_marketplace_item(
     item_in: MarketplaceItemCreate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
     # Enforce maximum of 3 active listings per user
@@ -154,7 +154,7 @@ async def list_marketplace_items(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
@@ -212,7 +212,7 @@ async def list_marketplace_items(
 def get_marketplace_item(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     """Fetch a single listing (used when opening a listing from a notification)."""
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
@@ -248,7 +248,7 @@ def get_marketplace_item(
 async def toggle_interest(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
     if not item:
@@ -285,7 +285,7 @@ async def toggle_interest(
 async def delete_marketplace_item(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
     if not item:

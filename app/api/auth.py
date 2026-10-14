@@ -1,6 +1,7 @@
 import uuid
 import json
 from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
@@ -16,7 +17,7 @@ from app.db.models import (
     MarketplaceItem, Confession, StudentApp, Notification, 
     Conversation, Message, MarketplaceInterest, ConfessionLike
 )
-from app.core.dependencies import get_current_user
+from app.core.dependencies import AuthenticatedUser, get_current_user
 from app.core.redis import get_redis
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -66,6 +67,17 @@ def auto_create_default_profile(db: Session, user: User, google_picture: str = N
         )
         db.add(default_profile)
         db.commit()
+
+
+def create_user_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
+    return security.create_access_token(
+        subject=str(user.id),
+        email=user.email,
+        college_domain=user.college_domain,
+        is_verified=user.is_verified,
+        is_admin=user.is_admin,
+        expires_delta=expires_delta,
+    )
 
 
 def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, plain_body: str):
@@ -250,7 +262,7 @@ async def verify_registration(
     await redis_client.delete(pending_key)
     await redis_client.delete(f"pending_email:{pending_data['email']}")
 
-    access_token = security.create_access_token(subject=str(user.id))
+    access_token = create_user_access_token(user)
     refresh_token = security.create_refresh_token(subject=str(user.id))
     
     response.set_cookie(
@@ -339,7 +351,10 @@ def login(
 
     auto_create_default_profile(db, user)
 
-    access_token = security.create_access_token(subject=str(user.id), expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    access_token = create_user_access_token(
+        user,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
     refresh_token = security.create_refresh_token(subject=str(user.id))
     
     response.set_cookie(
@@ -449,9 +464,9 @@ def google_login(
     google_name = id_info.get("name")
     auto_create_default_profile(db, user, google_picture, google_name)
 
-    access_token = security.create_access_token(
-        subject=str(user.id), 
-        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_user_access_token(
+        user,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     refresh_token = security.create_refresh_token(subject=str(user.id))
     
@@ -491,7 +506,7 @@ def refresh_token(
             raise HTTPException(status_code=401, detail="User not found or inactive")
             
         # Generate new tokens
-        new_access_token = security.create_access_token(subject=str(user.id))
+        new_access_token = create_user_access_token(user)
         new_refresh_token = security.create_refresh_token(subject=str(user.id))
         
         response.set_cookie(
@@ -520,7 +535,7 @@ async def logout(response: Response):
 async def delete_my_account(
     response: Response,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: AuthenticatedUser = Depends(get_current_user)
 ):
     uid = current_user.id
     
