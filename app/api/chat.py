@@ -133,7 +133,7 @@ def list_messages(
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, List[WebSocket]] = {}
-        self.user_tasks: dict[int, asyncio.Task] = {}
+        self.redis_listener_task: asyncio.Task | None = None
 
     async def connect(self, user_id: int, websocket: WebSocket):
         await websocket.accept()
@@ -141,9 +141,8 @@ class ConnectionManager:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
         
-        # Start a single Redis listener task for this user if not already running
-        if user_id not in self.user_tasks or self.user_tasks[user_id].done():
-            self.user_tasks[user_id] = asyncio.create_task(redis_listener(user_id))
+        if self.redis_listener_task is None or self.redis_listener_task.done():
+            self.redis_listener_task = asyncio.create_task(redis_listener())
 
     def disconnect(self, user_id: int, websocket: WebSocket):
         if user_id in self.active_connections:
@@ -151,9 +150,10 @@ class ConnectionManager:
                 self.active_connections[user_id].remove(websocket)
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
-                # Cancel the single Redis task when no active sockets remain for this user
-                task = self.user_tasks.pop(user_id, None)
-                if task and not task.done():
+            if not self.active_connections and self.redis_listener_task:
+                task = self.redis_listener_task
+                self.redis_listener_task = None
+                if not task.done():
                     task.cancel()
 
     async def send_personal_message(self, message_json: str, user_id: int):
@@ -169,22 +169,28 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-async def redis_listener(user_id: int):
+async def redis_listener():
     redis = await get_redis()
     pubsub = redis.pubsub()
-    channel_name = f"chat:{user_id}"
-    await pubsub.subscribe(channel_name)
     try:
+        await pubsub.psubscribe("chat:*")
         async for message in pubsub.listen():
-            if message["type"] == "message":
+            if message["type"] == "pmessage":
+                channel = message["channel"]
+                if not channel.startswith("chat:"):
+                    continue
+                try:
+                    user_id = int(channel.removeprefix("chat:"))
+                except ValueError:
+                    continue
                 await manager.send_personal_message(message["data"], user_id)
     except asyncio.CancelledError:
-        pass
+        raise
     except Exception as e:
-        print(f"Redis listener error for user {user_id}: {e}")
+        print(f"Redis chat listener error: {e}")
     finally:
         try:
-            await pubsub.unsubscribe(channel_name)
+            await pubsub.punsubscribe("chat:*")
             await pubsub.close()
         except Exception:
             pass
