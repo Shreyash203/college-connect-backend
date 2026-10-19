@@ -4,6 +4,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, desc, func
+from sqlalchemy.exc import IntegrityError
 from app.core.dependencies import AuthenticatedUser, decode_access_token, get_db
 from app.core.verified_dependencies import get_current_verified_user
 from app.db.models import User, StudentProfile, Conversation, Message, Notification
@@ -22,18 +23,27 @@ def start_conversation(target_user_id: int, current_user: AuthenticatedUser = De
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
         
+    u1, u2 = min(current_user.id, target_user_id), max(current_user.id, target_user_id)
+
     conv = db.query(Conversation).filter(
-        or_(
-            and_(Conversation.user1_id == current_user.id, Conversation.user2_id == target_user_id),
-            and_(Conversation.user1_id == target_user_id, Conversation.user2_id == current_user.id)
-        )
+        Conversation.user1_id == u1,
+        Conversation.user2_id == u2
     ).first()
     
     if not conv:
-        conv = Conversation(user1_id=current_user.id, user2_id=target_user_id)
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+        conv = Conversation(user1_id=u1, user2_id=u2)
+        try:
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+        except IntegrityError:
+            db.rollback()
+            conv = db.query(Conversation).filter(
+                Conversation.user1_id == u1,
+                Conversation.user2_id == u2
+            ).first()
+            if not conv:
+                raise HTTPException(status_code=500, detail="Could not create conversation.")
         
     target_profile = db.query(StudentProfile).filter(StudentProfile.user_id == target_user_id).first()
     

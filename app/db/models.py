@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -128,6 +128,9 @@ class Notification(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        UniqueConstraint("user1_id", "user2_id", name="uq_conversation_user_pair"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user1_id = Column(Integer, ForeignKey("users.id"), nullable=False)

@@ -10,12 +10,14 @@ from sqlalchemy import text
 
 Base.metadata.create_all(bind=engine)
 
-# Ensure columns exist for existing tables
+# Ensure columns and unique index exist for existing tables
 for stmt in [
     "ALTER TABLE student_profiles ADD COLUMN image_url VARCHAR(255) NULL;",
     "ALTER TABLE student_profiles ADD COLUMN vibe_photos JSON NULL;",
     "ALTER TABLE student_profiles ADD COLUMN prompts JSON NULL;",
     "ALTER TABLE marketplace_items ADD COLUMN image_url VARCHAR(255) NULL;",
+    "UPDATE conversations SET user1_id = user2_id, user2_id = user1_id WHERE user1_id > user2_id;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_user_pair ON conversations (user1_id, user2_id);",
 ]:
     try:
         with engine.begin() as conn:
