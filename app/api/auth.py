@@ -96,7 +96,29 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
-async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, max_requests: int = 3, window_seconds: int = 900):
+async def check_otp_cooldown(redis_client: aioredis.Redis, email: str, cooldown_seconds: int = 30):
+    """
+    Enforces a 30-second minimum gap between OTP email requests for the same address.
+    Raises 429 with remaining seconds if still within cooldown.
+    """
+    cooldown_key = f"otp_cooldown:{email.lower().strip()}"
+    acquired = await redis_client.set(
+        cooldown_key,
+        "1",
+        ex=cooldown_seconds,
+        nx=True,
+    )
+    if not acquired:
+        ttl = await redis_client.ttl(cooldown_key)
+        retry_after = max(ttl, 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {retry_after} seconds before requesting another code.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, max_requests: int = 5, window_seconds: int = 900):
     """
     Limits OTP emails to max_requests per window_seconds per email address.
     Protects students from spam and caps Azure Communication Services email fees.
@@ -157,7 +179,8 @@ async def register(
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
 
-    # Enforce per-email rate limit to cap Azure email costs
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    await check_otp_cooldown(redis_client, user_create.email)
     await check_email_otp_rate_limit(redis_client, user_create.email)
 
     # Generate secure, unique pending ID and OTP code
@@ -294,7 +317,8 @@ async def resend_otp(
 
     pending_data = json.loads(pending_data_str)
     
-    # Enforce per-email rate limit to cap Azure email costs
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    await check_otp_cooldown(redis_client, pending_data["email"])
     await check_email_otp_rate_limit(redis_client, pending_data["email"])
     
     new_otp = email_verification.generate_otp_code()
@@ -580,12 +604,22 @@ async def forgot_password(
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     user = db.query(User).filter(User.email == payload.email).first()
+    generic_response = {
+        "message": "If an account exists with this email, a password reset code has been sent."
+    }
     if not user:
         # Prevent user enumeration with generic success message
-        return {"message": "If an account exists with this email, a password reset code has been sent."}
+        return generic_response
 
-    # Enforce per-email rate limit to cap Azure email costs
-    await check_email_otp_rate_limit(redis_client, payload.email)
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    try:
+        await check_otp_cooldown(redis_client, payload.email)
+        await check_email_otp_rate_limit(redis_client, payload.email)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            # Keep response content independent of whether the account exists.
+            return generic_response
+        raise
 
     otp_code = email_verification.generate_otp_code()
     
