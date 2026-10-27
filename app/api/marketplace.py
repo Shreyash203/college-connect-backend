@@ -1,4 +1,5 @@
-from typing import List
+from typing import List, Optional
+from sqlalchemy import or_
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -151,6 +152,7 @@ async def create_marketplace_item(
 
 @router.get("/marketplace/items", response_model=List[dict])
 async def list_marketplace_items(
+    q: Optional[str] = None,
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
@@ -172,6 +174,15 @@ async def list_marketplace_items(
         if not current_user.is_admin:
             query = query.filter(User.college_domain == current_domain)
             
+        if q and q.strip():
+            term = f"%{q.strip()}%"
+            query = query.filter(
+                or_(
+                    MarketplaceItem.title.ilike(term),
+                    MarketplaceItem.description.ilike(term)
+                )
+            )
+
         items = (
             query.order_by(MarketplaceItem.created_at.desc())
             .offset(skip)
