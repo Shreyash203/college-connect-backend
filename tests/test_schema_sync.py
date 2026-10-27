@@ -6,10 +6,39 @@ import unittest
 from sqlalchemy import create_engine, text
 
 from app.db.models import Base
-from app.db.schema_sync import sync_auth_schema
+from app.db.schema_sync import sync_auth_schema, sync_event_schema
 
 
 class SchemaSyncTests(unittest.TestCase):
+    def test_sync_event_schema_adds_going_status_to_existing_rsvps(self):
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE event_rsvps ("
+                        "user_id INTEGER NOT NULL, "
+                        "event_id INTEGER NOT NULL, "
+                        "created_at DATETIME)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO event_rsvps (user_id, event_id) "
+                        "VALUES (1, 1)"
+                    )
+                )
+
+            sync_event_schema(engine)
+
+            with engine.begin() as connection:
+                row = connection.execute(
+                    text("SELECT status FROM event_rsvps WHERE user_id = 1")
+                ).one()
+            self.assertEqual(row.status, "going")
+        finally:
+            engine.dispose()
+
     def test_sync_auth_schema_does_not_restore_redis_managed_otp_columns(self):
         db_fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(db_fd)

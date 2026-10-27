@@ -1,7 +1,7 @@
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from app.db.models import User
+from app.db.models import EventRsvp, User
 
 
 def sync_auth_schema(engine: Engine) -> None:
@@ -24,3 +24,23 @@ def sync_auth_schema(engine: Engine) -> None:
         )
         with engine.begin() as connection:
             connection.execute(statement)
+
+
+def sync_event_schema(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if EventRsvp.__tablename__ not in inspector.get_table_names():
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns(EventRsvp.__tablename__)
+    }
+    if "status" in existing_columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE event_rsvps "
+                "ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'going'"
+            )
+        )

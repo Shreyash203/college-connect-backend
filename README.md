@@ -31,6 +31,13 @@ College Connect is a full-stack web application that lets students anonymously s
 - College-scoped confessions are **invisible** to students from other colleges
 - Like system with real-time like counts
 
+### 📅 Campus Events
+- Verified students can post upcoming campus events with date, time, venue, category, and short details
+- Share with **My College** or publish to the **Global** inter-college feed
+- View organizer name, department, and year alongside event details
+- RSVP as **Going** or **Interested** and see separate live counts
+- Event organizers can delete their own posts; RSVP activity notifies organizers
+
 ### 🛒 Campus Marketplace (Bazaar)
 - List items for sale with **image uploads** via Azure Blob Storage with SAS token authentication
 - Express interest in listings — sellers get notified
@@ -114,6 +121,7 @@ app/
 │   ├── auth.py             # Registration, login, OTP, Google OAuth, password reset
 │   ├── chat.py             # WebSocket chat + REST conversation endpoints
 │   ├── confessions.py      # CRUD + like system with scope filtering
+│   ├── events.py           # Campus event feed, creation, and Going/Interested RSVPs
 │   ├── marketplace.py      # Item listings with image upload + interest system
 │   ├── notifications.py    # Notification CRUD + unread count + clear all
 │   ├── profiles.py         # Student profile management

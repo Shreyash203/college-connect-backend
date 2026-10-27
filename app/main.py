@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, profiles, marketplace, confessions, launchpad, notifications, chat
+from app.api import auth, profiles, marketplace, confessions, launchpad, notifications, chat, events
 from app.core.config import settings
 from app.db.session import engine
 from app.db.models import Base
+from app.db.schema_sync import sync_event_schema
 
 Base.metadata.create_all(bind=engine)
+sync_event_schema(engine)
 
 import asyncio
 from datetime import datetime, timedelta
@@ -85,6 +87,7 @@ app.include_router(confessions.router, prefix="/api")
 app.include_router(launchpad.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(events.router, prefix="/api")
 
 @app.get("/")
 def root():
