@@ -13,6 +13,10 @@ class AuthRouteTests(unittest.TestCase):
         self.assertNotIn("/auth/verify-email", route_paths)
         self.assertIn("/auth/verify-registration", route_paths)
 
+    def test_unauthenticated_user_deletion_route_is_not_registered(self):
+        route_paths = {route.path for route in auth.router.routes}
+        self.assertNotIn("/auth/delete-user", route_paths)
+
     def test_access_token_contains_user_claims_without_database_lookup(self):
         user = SimpleNamespace(
             id=7,

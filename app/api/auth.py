@@ -24,7 +24,6 @@ from google.auth.transport import requests as google_requests
 
 from app.core.rate_limiter import SlidingWindowRateLimiter, DailyUploadRateLimiter
 from app.schemas.auth import (
-    DeleteUserRequest,
     UserCreate,
     Token,
     RegisterResponse,
@@ -715,26 +714,3 @@ async def reset_password(
     await redis_client.delete(reset_key)
 
     return {"message": "Password reset successfully."}
-
-
-@router.post('/auth/delete-user')
-def delete_user(request: DeleteUserRequest, db: Session = Depends(get_db)):
-    if settings.ENV.lower() not in {'development', 'dev', 'test'}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail='User deletion is only allowed in development mode.',
-        )
-
-    user = db.query(User).filter(User.email == request.email).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found.')
-
-    profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
-    if profile:
-        db.execute(profile_interests.delete().where(profile_interests.c.profile_id == profile.id))
-        db.delete(profile)
-
-    db.delete(user)
-    db.commit()
-
-    return {"message": f"Deleted user {request.email}."}
