@@ -1,8 +1,10 @@
 import time
 import logging
 from datetime import datetime, timedelta
-from fastapi import Request, HTTPException, status
+from fastapi import Depends, Request, HTTPException, status
+from app.core.dependencies import AuthenticatedUser
 from app.core.redis import redis_service
+from app.core.verified_dependencies import get_current_verified_user
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -57,19 +59,16 @@ class SlidingWindowRateLimiter:
 
 class DailyUploadRateLimiter:
     """
-    A daily upload rate limiter that restricts uploads to 3 per day per IP.
-    Uses a Redis key with date suffix to track daily uploads.
+    A daily upload rate limiter that tracks requests per authenticated user and endpoint.
     """
     def __init__(self, limit: int = 3):
         self.limit = limit
 
-    async def __call__(self, request: Request):
-        # Since Azure Container Apps sit behind a proxy, we must get the real IP from X-Forwarded-For
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
-        else:
-            client_ip = request.client.host if request.client else "unknown"
+    async def __call__(
+        self,
+        request: Request,
+        current_user: AuthenticatedUser = Depends(get_current_verified_user),
+    ):
         endpoint = request.url.path
         
         # Only limit upload endpoints
@@ -77,7 +76,7 @@ class DailyUploadRateLimiter:
             return
             
         today = datetime.utcnow().strftime("%Y-%m-%d")
-        key = f"daily_upload_limit:{client_ip}:{today}"
+        key = f"daily_upload_limit:{current_user.id}:{endpoint}:{today}"
 
         client = redis_service.get_client()
         
