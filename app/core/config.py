@@ -74,6 +74,7 @@ class Settings(BaseSettings):
         if vault_name:
             try:
                 from azure.identity import DefaultAzureCredential
+                from azure.core.exceptions import ResourceNotFoundError
                 from azure.keyvault.secrets import SecretClient
             except ImportError as exc:
                 raise RuntimeError(
@@ -117,6 +118,10 @@ class Settings(BaseSettings):
                             setattr(model, setting_name, int(secret_value))
                         else:
                             setattr(model, setting_name, secret_value)
+                    except ResourceNotFoundError:
+                        if setting_name == "EMAIL_FROM" or getattr(model, setting_name) is not None:
+                            continue
+                        raise
                     except Exception as exc:
                         if getattr(model, setting_name) is not None:
                             continue
