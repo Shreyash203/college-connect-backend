@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
@@ -10,6 +12,7 @@ from app.api.profiles import (
     enforce_profile_blob_size,
     get_owned_profile_blob_name,
 )
+from app.core.dependencies import AuthenticatedUser
 from app.core.rate_limiter import DailyUploadRateLimiter
 
 
@@ -37,13 +40,38 @@ class ProfileUploadLimitTests(unittest.IsolatedAsyncioTestCase):
             for route in profiles.router.routes
             if isinstance(route, APIRoute) and route.path == "/profiles/me/upload-url"
         )
-
         self.assertTrue(
             any(
                 isinstance(dependency.call, DailyUploadRateLimiter)
                 for dependency in route.dependant.dependencies
             )
         )
+
+    async def test_daily_upload_limit_is_scoped_to_user_and_endpoint(self):
+        limiter = DailyUploadRateLimiter(limit=3)
+        redis_client = SimpleNamespace(
+            get=AsyncMock(return_value=None),
+            incr=AsyncMock(),
+            expire=AsyncMock(),
+        )
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/profiles/me/upload-url"),
+            headers={"X-Forwarded-For": "203.0.113.1"},
+        )
+        users = [
+            AuthenticatedUser(1, "one@example.com", "example.com", True, False),
+            AuthenticatedUser(2, "two@example.com", "example.com", True, False),
+        ]
+
+        with patch("app.core.rate_limiter.redis_service.get_client", return_value=redis_client):
+            for user in users:
+                await limiter(request, user)
+
+        keys = [call.args[0] for call in redis_client.get.call_args_list]
+        self.assertEqual(len(keys), 2)
+        self.assertNotEqual(keys[0], keys[1])
+        self.assertIn(":1:/profiles/me/upload-url:", keys[0])
+        self.assertIn(":2:/profiles/me/upload-url:", keys[1])
 
     def test_accepts_image_at_10_mib_limit(self):
         blob = FakeBlobClient(MAX_PROFILE_IMAGE_SIZE)
