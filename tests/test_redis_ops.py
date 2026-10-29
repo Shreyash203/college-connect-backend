@@ -1,77 +1,61 @@
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException
-from app.core.rate_limiter import RateLimiter
+from app.core.rate_limiter import SlidingWindowRateLimiter
 
-class TestRateLimiter(unittest.TestCase):
-    def test_rate_limiter_allows_requests_below_limit(self):
-        # Mock request
-        request = MagicMock()
-        request.client.host = "127.0.0.1"
-        request.url.path = "/test-endpoint"
 
-        # Mock Redis client with pipelines
+class TestSlidingWindowRateLimiter(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.request = MagicMock()
+        self.request.client.host = "127.0.0.1"
+        self.request.headers.get.return_value = None
+        self.request.url.path = "/test-endpoint"
+
+    @staticmethod
+    def make_pipeline(execute_result=None, execute_error=None):
+        pipeline = MagicMock()
+        pipeline.__aenter__ = AsyncMock(return_value=pipeline)
+        pipeline.__aexit__ = AsyncMock(return_value=None)
+        if execute_error:
+            pipeline.execute = AsyncMock(side_effect=execute_error)
+        else:
+            pipeline.execute = AsyncMock(return_value=execute_result)
+        return pipeline
+
+    async def test_allows_requests_below_limit(self):
+        read_pipeline = self.make_pipeline((None, 2))
+        write_pipeline = self.make_pipeline((None, None))
         mock_client = MagicMock()
-        mock_pipe = AsyncMock()
-        mock_pipe.execute.return_value = (None, 2)  # Return 2 requests (below limit of 5)
-        mock_client.pipeline.return_value.__aenter__.return_value = mock_pipe
+        mock_client.pipeline.side_effect = [read_pipeline, write_pipeline]
 
         with patch("app.core.rate_limiter.redis_service.get_client", return_value=mock_client):
-            limiter = RateLimiter(limit=5, window_seconds=60)
-            
-            async def run():
-                await limiter(request)
-                
-            asyncio.run(run())
+            await SlidingWindowRateLimiter(limit=5, window_seconds=60)(self.request)
 
-            mock_pipe.zremrangebyscore.assert_called_once()
-            mock_pipe.zcard.assert_called_once()
-            mock_pipe.zadd.assert_called_once()
-            mock_pipe.expire.assert_called_once()
+        read_pipeline.zremrangebyscore.assert_called_once()
+        read_pipeline.zcard.assert_called_once()
+        write_pipeline.zadd.assert_called_once()
+        write_pipeline.expire.assert_called_once()
 
-    def test_rate_limiter_blocks_requests_above_limit(self):
-        # Mock request
-        request = MagicMock()
-        request.client.host = "127.0.0.1"
-        request.url.path = "/test-endpoint"
-
-        # Mock Redis client
+    async def test_blocks_requests_at_limit(self):
+        read_pipeline = self.make_pipeline((None, 5))
         mock_client = MagicMock()
-        mock_pipe = AsyncMock()
-        mock_pipe.execute.return_value = (None, 5)  # Return 5 requests (equal to limit of 5)
-        mock_client.pipeline.return_value.__aenter__.return_value = mock_pipe
+        mock_client.pipeline.return_value = read_pipeline
 
         with patch("app.core.rate_limiter.redis_service.get_client", return_value=mock_client):
-            limiter = RateLimiter(limit=5, window_seconds=60)
-            
-            async def run():
-                with self.assertRaises(HTTPException) as context:
-                    await limiter(request)
-                self.assertEqual(context.exception.status_code, 429)
+            with self.assertRaises(HTTPException) as context:
+                await SlidingWindowRateLimiter(limit=5, window_seconds=60)(self.request)
 
-            asyncio.run(run())
+        self.assertEqual(context.exception.status_code, 429)
+        mock_client.pipeline.assert_called_once_with(transaction=True)
+        read_pipeline.zadd.assert_not_called()
 
-    def test_rate_limiter_fails_open_on_redis_error(self):
-        # Mock request
-        request = MagicMock()
-        request.client.host = "127.0.0.1"
-        request.url.path = "/test-endpoint"
-
-        # Mock Redis client causing connection error
+    async def test_fails_open_on_redis_error(self):
+        read_pipeline = self.make_pipeline(execute_error=ConnectionError("Redis Down"))
         mock_client = MagicMock()
-        mock_client.pipeline.side_effect = Exception("Redis Down")
+        mock_client.pipeline.return_value = read_pipeline
 
         with patch("app.core.rate_limiter.redis_service.get_client", return_value=mock_client):
-            limiter = RateLimiter(limit=5, window_seconds=60)
-            
-            async def run():
-                try:
-                    await limiter(request)
-                except Exception as e:
-                    self.fail(f"Rate Limiter failed to fail-open: raised {e}")
-
-            asyncio.run(run())
+            await SlidingWindowRateLimiter(limit=5, window_seconds=60)(self.request)
 
 
 if __name__ == "__main__":

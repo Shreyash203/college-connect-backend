@@ -2,7 +2,7 @@ name: Build and Deploy Backend (dev)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "**" ]
   workflow_dispatch:
 
 permissions:
@@ -62,4 +62,9 @@ jobs:
             -n ca-college-connect-api \
             -g rg-college-connect-dev \
             --image $IMAGE_REPOSITORY:${{ github.sha }} \
-            --set-env-vars "ADMIN_EMAILS=shreyash.santosh.bhanage@gmail.com"
+            --set-env-vars \
+              "ADMIN_EMAILS=shreyash.santosh.bhanage@gmail.com" \
+              "ENV=production" \
+              "AZURE_KEY_VAULT_NAME=kv-college-connect-dev" \
+              "APP_BASE_URL=https://ca-college-connect-frontend.ashygrass-6a4c76da.centralindia.azurecontainerapps.io" \
+              "CORS_ORIGINS=https://ca-college-connect-frontend.ashygrass-6a4c76da.centralindia.azurecontainerapps.io"

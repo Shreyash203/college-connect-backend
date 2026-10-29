@@ -22,7 +22,8 @@ class Settings(BaseSettings):
 
     DATABASE_URL: Optional[str] = Field(None, env="DATABASE_URL")
 
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(60, env="ACCESS_TOKEN_EXPIRE_MINUTES")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(30, env="ACCESS_TOKEN_EXPIRE_MINUTES")
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(7, env="REFRESH_TOKEN_EXPIRE_DAYS")
     JWT_SECRET_KEY: Optional[str] = Field(None, env="JWT_SECRET_KEY")
     JWT_ALGORITHM: str = "HS256"
     GOOGLE_CLIENT_ID: str = Field("774747436427-57ign6kn9qt9tat4ipq7cnb04hio3rmn.apps.googleusercontent.com", env="GOOGLE_CLIENT_ID")
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = Field(None, env="AZURE_STORAGE_CONNECTION_STRING")
     AZURE_STORAGE_CONTAINER_NAME: Optional[str] = Field("profile-images", env="AZURE_STORAGE_CONTAINER_NAME")
     REDIS_URL: str = Field("redis://localhost:6379/0", env="REDIS_URL")
-    ADMIN_EMAILS: str = Field("shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
+    ADMIN_EMAILS: str = Field("shreyash.santosh.bhanage@gmail.com,shreyashbhanage@gmail.com", env="ADMIN_EMAILS")
 
 
 
@@ -73,6 +74,7 @@ class Settings(BaseSettings):
         if vault_name:
             try:
                 from azure.identity import DefaultAzureCredential
+                from azure.core.exceptions import ResourceNotFoundError
                 from azure.keyvault.secrets import SecretClient
             except ImportError as exc:
                 raise RuntimeError(
@@ -116,6 +118,10 @@ class Settings(BaseSettings):
                             setattr(model, setting_name, int(secret_value))
                         else:
                             setattr(model, setting_name, secret_value)
+                    except ResourceNotFoundError:
+                        if setting_name == "EMAIL_FROM" or getattr(model, setting_name) is not None:
+                            continue
+                        raise
                     except Exception as exc:
                         if getattr(model, setting_name) is not None:
                             continue

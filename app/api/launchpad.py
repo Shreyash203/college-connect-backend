@@ -6,7 +6,7 @@ from fastapi.concurrency import run_in_threadpool
 from app.core.redis import redis_service
 import json
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.db.models import User, StudentApp
 from app.schemas.intercollege import StudentAppCreate, StudentAppRead
 from app.core.verified_dependencies import get_current_verified_user
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/launchpad", tags=["Launchpad"])
 def create_app(
     app_in: StudentAppCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     existing_app = db.query(StudentApp).filter(StudentApp.user_id == current_user.id).first()
     if existing_app:
@@ -49,6 +49,7 @@ def create_app(
         college_domain=new_app.college_domain,
         created_at=new_app.created_at,
         user_id=new_app.user_id,
+        email=current_user.email,
         is_mine=True
     )
 
@@ -57,7 +58,7 @@ async def get_all_apps(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     cache_key = f"cache:launchpad:{skip}:{limit}"
     redis = redis_service.get_client()
@@ -97,7 +98,8 @@ async def get_all_apps(
             "description": a.description,
             "app_url": a.app_url,
             "college_domain": a.college_domain,
-            "created_at": a.created_at.isoformat()
+            "email": a.user.email if a.user else None,
+            "created_at": a.created_at.isoformat() + "Z"
         })
         
         results.append(StudentAppRead(
@@ -108,6 +110,7 @@ async def get_all_apps(
             college_domain=a.college_domain,
             created_at=a.created_at,
             user_id=a.user_id,
+            email=a.user.email if a.user else None,
             is_mine=(a.user_id == current_user.id) or current_user.is_admin
         ))
         
@@ -122,7 +125,7 @@ async def get_all_apps(
 def delete_app(
     app_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     student_app = db.query(StudentApp).filter(StudentApp.id == app_id).first()
     if not student_app:

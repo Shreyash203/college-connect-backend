@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 
@@ -46,6 +46,8 @@ class StudentProfile(Base):
     department = Column(String(100), nullable=True)
     year = Column(String(50), nullable=True)
     bio = Column(String(1000), nullable=True)
+    vibe_photos = Column(JSON, nullable=True)  # List of up to 2 extra image URLs
+    prompts = Column(JSON, nullable=True)  # List of {"question": str, "answer": str}
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="profile")
@@ -86,6 +88,7 @@ class Confession(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     college_domain = Column(String(255), nullable=False)
     content = Column(String(1000), nullable=False)
+    scope = Column(String(20), nullable=False, default='global')  # 'global' or 'college'
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", backref="confessions")
@@ -117,7 +120,60 @@ class Notification(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     message = Column(String(1000), nullable=False)
+    link = Column(String(255), nullable=True)  # In-app route, e.g. /messages?conversationId=5
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", backref="notifications")
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    __table_args__ = (
+        UniqueConstraint("user1_id", "user2_id", name="uq_conversation_user_pair"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user1_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user2_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # We won't use direct relationship mapping here to avoid messy circular dependencies
+    # We will query these manually or use primaryjoin if strictly needed.
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(String(1000), nullable=False)  # The strict 1000-character payload limit
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+
+class CampusEvent(Base):
+    __tablename__ = "campus_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(String(1500), nullable=False)
+    event_date = Column(DateTime, nullable=False, index=True)
+    venue = Column(String(255), nullable=False)
+    category = Column(String(50), nullable=False, default="General")  # e.g., Hackathon, Workshop, Sports, Cultural, Meetup
+    scope = Column(String(20), nullable=False, default="college")      # 'college' or 'global'
+    college_domain = Column(String(255), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="campus_events")
+
+
+class EventRsvp(Base):
+    __tablename__ = "event_rsvps"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    event_id = Column(Integer, ForeignKey("campus_events.id", ondelete="CASCADE"), primary_key=True)
+    status = Column(String(20), nullable=False, default="going", server_default="going")
+    created_at = Column(DateTime, default=datetime.utcnow)

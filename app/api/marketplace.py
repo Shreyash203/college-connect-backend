@@ -1,11 +1,12 @@
-from typing import List
+from typing import List, Optional
+from sqlalchemy import or_
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db
+from app.core.dependencies import AuthenticatedUser, get_db
 from app.core.verified_dependencies import get_current_verified_user
-from app.db.models import MarketplaceItem, User, MarketplaceInterest
+from app.db.models import MarketplaceItem, User, MarketplaceInterest, Notification
 from app.core.config import settings
 from app.core.rate_limiter import DailyUploadRateLimiter
 from fastapi.concurrency import run_in_threadpool
@@ -16,17 +17,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
 from app.schemas.marketplace import MarketplaceItemCreate
+import re as _re
+from app.core.azure_storage import (
+    delete_marketplace_blob,
+    verify_azure_host_and_container,
+)
 
 router = APIRouter()
 
-@router.get("/marketplace/items/upload-url", response_model=dict)
+@router.get("/marketplace/items/upload-url", response_model=dict, dependencies=[Depends(DailyUploadRateLimiter(limit=20))])
 def get_marketplace_upload_url(
     filename: str,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
 ):
-    # Apply rate limiting (3 uploads per day)
-    daily_limiter = DailyUploadRateLimiter(limit=3)
-    
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
     
@@ -42,7 +45,7 @@ def get_marketplace_upload_url(
     if not account_name or not account_key:
         raise HTTPException(status_code=500, detail="Invalid storage connection string.")
 
-    blob_name = f"marketplace_images/{uuid.uuid4()}{ext}"
+    blob_name = f"marketplace_images/user_{current_user.id}/{uuid.uuid4()}{ext}"
     
     # Ensure container exists and is publicly accessible
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
@@ -77,9 +80,49 @@ def get_marketplace_upload_url(
 @router.post("/marketplace/items", response_model=dict)
 async def create_marketplace_item(
     item_in: MarketplaceItemCreate,
-    current_user: User = Depends(get_current_verified_user),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
+    # Enforce maximum of 3 active listings per user
+    active_count = db.query(MarketplaceItem).filter(MarketplaceItem.user_id == current_user.id).count()
+    if active_count >= 3:
+        raise HTTPException(
+            status_code=400, 
+            detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
+        )
+
+    # Validate that the image genuinely belongs to this user on the configured Azure storage container.
+    # This prevents attaching another user's image blob or cross-container blobs.
+    if item_in.image_url:
+        verification = verify_azure_host_and_container(item_in.image_url)
+        if not verification:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image URL. Images must be hosted on the configured Azure Blob Storage container.",
+            )
+
+        _, blob_name_clean = verification
+        user_prefix_pattern = (
+            rf"^marketplace_images/user_{current_user.id}/"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+            r"\.(jpg|jpeg|png|gif|webp|svg)$"
+        )
+        if not _re.match(user_prefix_pattern, blob_name_clean, _re.IGNORECASE):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image URL. The image does not belong to your account.",
+            )
+
+        # Ensure the image is not already in use by another active marketplace listing
+        existing_image = db.query(MarketplaceItem).filter(MarketplaceItem.image_url == item_in.image_url).first()
+        if existing_image:
+            raise HTTPException(
+                status_code=400,
+                detail="This image has already been attached to another marketplace listing.",
+            )
+
+
+
     item = MarketplaceItem(
         user_id=current_user.id,
         title=item_in.title,
@@ -109,10 +152,11 @@ async def create_marketplace_item(
 
 @router.get("/marketplace/items", response_model=List[dict])
 async def list_marketplace_items(
+    q: Optional[str] = None,
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
@@ -121,12 +165,26 @@ async def list_marketplace_items(
         # Extract exact literal domain (e.g., alumni.iith.ac.in or iith.ac.in)
         current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
         
-        items = (
+        query = (
             db.query(MarketplaceItem)
             .join(User, MarketplaceItem.user_id == User.id)
             .filter(MarketplaceItem.created_at >= cutoff)
-            .filter(User.college_domain == current_domain)
-            .order_by(MarketplaceItem.created_at.desc())
+        )
+        
+        if not current_user.is_admin:
+            query = query.filter(User.college_domain == current_domain)
+            
+        if q and q.strip():
+            term = f"%{q.strip()}%"
+            query = query.filter(
+                or_(
+                    MarketplaceItem.title.ilike(term),
+                    MarketplaceItem.description.ilike(term)
+                )
+            )
+
+        items = (
+            query.order_by(MarketplaceItem.created_at.desc())
             .offset(skip)
             .limit(limit)
             .all()
@@ -153,6 +211,7 @@ async def list_marketplace_items(
             "description": i.description,
             "image_url": i.image_url,
             "user_id": i.user_id,
+            "email": i.user.email if i.user else None,
             "is_mine": (i.user_id == current_user.id) or current_user.is_admin,
             "interest_count": len(interested_users),
             "has_indicated_interest": current_user.id in interested_users
@@ -160,11 +219,47 @@ async def list_marketplace_items(
         
     return results
 
+@router.get("/marketplace/items/{item_id}", response_model=dict)
+def get_marketplace_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
+):
+    """Fetch a single listing (used when opening a listing from a notification)."""
+    item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    is_owner = item.user_id == current_user.id
+    if not is_owner and not current_user.is_admin:
+        # Same visibility rules as the list — respond 404 so hidden listings aren't revealed
+        current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
+        expired = item.created_at < datetime.utcnow() - timedelta(days=14)
+        other_college = not item.user or item.user.college_domain != current_domain
+        if expired or other_college:
+            raise HTTPException(status_code=404, detail="Item not found")
+
+    interested_users = [
+        i.user_id
+        for i in db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id == item.id).all()
+    ]
+    return {
+        "id": item.id,
+        "title": item.title,
+        "description": item.description,
+        "image_url": item.image_url,
+        "user_id": item.user_id,
+        "email": item.user.email if item.user else None,
+        "is_mine": is_owner or current_user.is_admin,
+        "interest_count": len(interested_users),
+        "has_indicated_interest": current_user.id in interested_users
+    }
+
 @router.post("/marketplace/items/{item_id}/interest")
 async def toggle_interest(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
     if not item:
@@ -182,6 +277,15 @@ async def toggle_interest(
         new_interest = MarketplaceInterest(user_id=current_user.id, item_id=item_id)
         db.add(new_interest)
         interested = True
+
+        # Notify item owner — but not if they expressed interest in their own item
+        if item.user_id != current_user.id:
+            notif = Notification(
+                user_id=item.user_id,
+                message=f"Someone is interested in your listing: '{item.title}' 🛒",
+                link=f"/marketplace?item={item.id}"
+            )
+            db.add(notif)
         
     db.commit()
     
@@ -192,7 +296,7 @@ async def toggle_interest(
 async def delete_marketplace_item(
     item_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_verified_user)
+    current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
     if not item:
@@ -200,8 +304,13 @@ async def delete_marketplace_item(
     if item.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this item")
     
+    image_url = item.image_url
+    
     db.delete(item)
     db.commit()
+    
+    if image_url:
+        await run_in_threadpool(delete_marketplace_blob, image_url, item.user_id)
     
     redis = redis_service.get_client()
     try:

@@ -11,13 +11,10 @@ if database_url is None:
 if database_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 
-engine = create_engine(database_url, connect_args=connect_args)
+engine_kwargs = {"connect_args": connect_args}
+if not database_url.startswith("sqlite"):
+    engine_kwargs.update({"pool_pre_ping": True, "pool_recycle": 300})
 
-# Add new column for profile image if it doesn't exist (ignore errors if already present)
-try:
-    with engine.begin() as conn:
-        conn.execute("ALTER TABLE student_profiles ADD COLUMN image_url VARCHAR(255) NULL;")
-except Exception:
-    # Column likely already exists or DB engine doesn't support the operation; safe to ignore
-    pass
+engine = create_engine(database_url, **engine_kwargs)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

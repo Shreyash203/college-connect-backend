@@ -1,23 +1,29 @@
 import uuid
 import json
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 import redis.asyncio as aioredis
 
 from app.core import email_client, email_verification, security
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.db.models import User, StudentProfile, profile_interests, AuthorizedDomain
+from app.db.models import (
+    User, StudentProfile, profile_interests, AuthorizedDomain,
+    MarketplaceItem, Confession, StudentApp, Notification, 
+    Conversation, Message, MarketplaceInterest, ConfessionLike
+)
+from app.core.dependencies import AuthenticatedUser, get_current_user
 from app.core.redis import get_redis
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
 from app.core.rate_limiter import SlidingWindowRateLimiter, DailyUploadRateLimiter
 from app.schemas.auth import (
-    DeleteUserRequest,
     UserCreate,
     Token,
     RegisterResponse,
@@ -38,6 +44,40 @@ def get_db():
     finally:
         db.close()
 
+def auto_create_default_profile(db: Session, user: User, google_picture: str = None, google_name: str = None):
+    """Auto-create a default profile for a user so they can browse immediately."""
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
+    if not profile:
+        display_name = google_name if google_name else user.email.split('@')[0].replace('.', ' ').title()
+        
+        # Use Google Picture if available, otherwise generate a UI Avatar
+        if google_picture:
+            image_url = google_picture
+        else:
+            image_url = f"https://ui-avatars.com/api/?name={display_name.replace(' ', '+')}&background=random&color=fff&size=256"
+            
+        default_profile = StudentProfile(
+            user_id=user.id,
+            display_name=display_name,
+            year="2023",
+            department="Unknown",
+            bio="Hi! I just joined College Connect.",
+            image_url=image_url
+        )
+        db.add(default_profile)
+        db.commit()
+
+
+def create_user_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
+    return security.create_access_token(
+        subject=str(user.id),
+        email=user.email,
+        college_domain=user.college_domain,
+        is_verified=user.is_verified,
+        is_admin=user.is_admin,
+        expires_delta=expires_delta,
+    )
+
 
 def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, plain_body: str):
     email_service = email_client.EmailService()
@@ -55,28 +95,78 @@ def _send_email_or_dev_fallback(to_address: str, subject: str, html_body: str, p
     return None
 
 
+async def check_otp_cooldown(redis_client: aioredis.Redis, email: str, cooldown_seconds: int = 30):
+    """
+    Enforces a 30-second minimum gap between OTP email requests for the same address.
+    Raises 429 with remaining seconds if still within cooldown.
+    """
+    cooldown_key = f"otp_cooldown:{email.lower().strip()}"
+    acquired = await redis_client.set(
+        cooldown_key,
+        "1",
+        ex=cooldown_seconds,
+        nx=True,
+    )
+    if not acquired:
+        ttl = await redis_client.ttl(cooldown_key)
+        retry_after = max(ttl, 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {retry_after} seconds before requesting another code.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, max_requests: int = 5, window_seconds: int = 900):
+    """
+    Limits OTP emails to max_requests per window_seconds per email address.
+    Protects students from spam and caps Azure Communication Services email fees.
+    """
+    key = f"otp_email_rate:{email.lower().strip()}"
+    current = await redis_client.get(key)
+    if current and int(current) >= max_requests:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many verification codes requested for this email. Please wait 15 minutes before requesting another."
+        )
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        if not current:
+            pipe.expire(key, window_seconds)
+        await pipe.execute()
+
+
 @router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
     user_create: UserCreate, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     email_domain = user_create.email.split("@")[-1].lower()
+    is_admin_email = user_create.email.lower() in settings.admin_emails_list
     
-    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
-    if not is_authorized:
-        if email_domain.endswith(('.ac.in', '.edu.in')):
-            try:
-                new_domain = AuthorizedDomain(domain=email_domain)
-                db.add(new_domain)
-                db.commit()
-            except Exception:
-                db.rollback() # Handle rare race conditions cleanly
-        else:
+    if not is_admin_email:
+        if email_domain == "gmail.com":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only authorized email domains are permitted.",
+                detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
+        
+        is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
+        if not is_authorized:
+            if email_domain.endswith(('.ac.in', '.edu.in')):
+                try:
+                    new_domain = AuthorizedDomain(domain=email_domain)
+                    db.add(new_domain)
+                    db.commit()
+                except Exception:
+                    db.rollback() # Handle rare race conditions cleanly
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Only authorized email domains are permitted.",
+                )
 
     if len(user_create.password.encode("utf-8")) > 72:
         raise HTTPException(
@@ -87,6 +177,10 @@ async def register(
     existing = db.query(User).filter(User.email == user_create.email).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
+
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    await check_otp_cooldown(redis_client, user_create.email)
+    await check_email_otp_rate_limit(redis_client, user_create.email)
 
     # Generate secure, unique pending ID and OTP code
     pending_id = str(uuid.uuid4())
@@ -107,6 +201,7 @@ async def register(
         "email": user_create.email,
         "password_hash": password_hash,
         "otp": otp_code,
+        "attempts": 0,
     }
     await redis_client.setex(f"pending_registration:{pending_id}", 600, json.dumps(pending_data))
     await redis_client.setex(f"pending_email:{user_create.email}", 600, pending_id)
@@ -125,7 +220,13 @@ async def register(
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=user_create.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=user_create.email, 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
     return RegisterResponse(pending_id=pending_id, message="Registration initiated. Check your email for the verification code.")
 
@@ -133,6 +234,7 @@ async def register(
 @router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def verify_registration(
     payload: VerifyRegistrationRequest, 
+    response: Response,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
@@ -143,8 +245,22 @@ async def verify_registration(
 
     pending_data = json.loads(pending_data_str)
 
-    if pending_data["otp"] != payload.otp:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code.")
+    if pending_data.get("otp") != payload.otp:
+        attempts = pending_data.get("attempts", 0) + 1
+        pending_data["attempts"] = attempts
+        if attempts >= 5:
+            await redis_client.delete(pending_key)
+            await redis_client.delete(f"pending_email:{pending_data['email']}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many incorrect attempts. This verification code has been invalidated. Please register again."
+            )
+        await redis_client.setex(pending_key, 600, json.dumps(pending_data))
+        remaining = 5 - attempts
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid verification code. {remaining} attempt(s) remaining."
+        )
 
     existing_user = db.query(User).filter(User.email == pending_data["email"]).first()
     if existing_user:
@@ -162,17 +278,35 @@ async def verify_registration(
     db.commit()
     db.refresh(user)
 
+    auto_create_default_profile(db, user)
+
     # Clean up Redis records
     await redis_client.delete(pending_key)
     await redis_client.delete(f"pending_email:{pending_data['email']}")
 
-    access_token = security.create_access_token(subject=str(user.id))
-    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
+    access_token = create_user_access_token(user)
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "user_id": user.id
+    }
 
 
 @router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def resend_otp(
     payload: ResendOtpRequest, 
+    background_tasks: BackgroundTasks,
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     pending_key = f"pending_registration:{payload.pending_id}"
@@ -181,8 +315,14 @@ async def resend_otp(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found or expired.")
 
     pending_data = json.loads(pending_data_str)
+    
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    await check_otp_cooldown(redis_client, pending_data["email"])
+    await check_email_otp_rate_limit(redis_client, pending_data["email"])
+    
     new_otp = email_verification.generate_otp_code()
     pending_data["otp"] = new_otp
+    pending_data["attempts"] = 0
 
     # Store updated registration data and reset the TTL to 10 minutes
     await redis_client.setex(pending_key, 600, json.dumps(pending_data))
@@ -202,13 +342,20 @@ async def resend_otp(
         f"If you did not sign up, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=pending_data["email"], subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=pending_data["email"], 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
     return {"message": "A new verification code has been sent to your email."}
 
 
 @router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
-async def login(
+def login(
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
 ):
@@ -224,15 +371,36 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email address must be verified before login.",
         )
-    access_token = security.create_access_token(subject=str(user.id), expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    auto_create_default_profile(db, user)
+
+    access_token = create_user_access_token(
+        user,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer"
+    }
 
 
 import requests as http_requests
 
-@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
-async def google_login(
+@router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
+def google_login(
     payload: GoogleLoginRequest, 
+    response: Response,
     db: Session = Depends(get_db)
 ):
     id_info = None
@@ -259,22 +427,46 @@ async def google_login(
     if not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Google token missing email.")
 
+    # Security check: Ensure token was issued specifically for College Connect
+    token_aud = id_info.get("aud")
+    if token_aud != settings.GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token audience: Token was not issued for College Connect."
+        )
+
+    # Security check: Ensure Google has verified ownership of this email address
+    email_verified = id_info.get("email_verified")
+    if email_verified not in (True, "true", "True"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google email address has not been verified."
+        )
+
     domain = email.split("@")[-1].lower() if "@" in email else ""
+    is_admin_email = email.lower() in settings.admin_emails_list
     
-    is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
-    if not is_authorized:
-        if domain.endswith(('.ac.in', '.edu.in')):
-            try:
-                new_domain = AuthorizedDomain(domain=domain)
-                db.add(new_domain)
-                db.commit()
-            except Exception:
-                db.rollback()
-        else:
+    if not is_admin_email:
+        if domain == "gmail.com":
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
+        
+        is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
+        if not is_authorized:
+            if domain.endswith(('.ac.in', '.edu.in')):
+                try:
+                    new_domain = AuthorizedDomain(domain=domain)
+                    db.add(new_domain)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Your college domain (@{domain}) is not authorized for College Connect."
+                )
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
@@ -291,34 +483,158 @@ async def google_login(
         user.is_verified = True
         db.commit()
 
-    access_token = security.create_access_token(
-        subject=str(user.id), 
-        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    google_picture = id_info.get("picture")
+    google_name = id_info.get("name")
+    auto_create_default_profile(db, user, google_picture, google_name)
+
+    access_token = create_user_access_token(
+        user,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
+    refresh_token = security.create_refresh_token(subject=str(user.id))
+    
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "user_id": user.id
+    }
+
+
+@router.post("/auth/refresh")
+def refresh_token(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    db: Session = Depends(get_db)
+):
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token missing")
+    try:
+        payload = jwt.decode(refresh_token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        user_id: str = payload.get("sub") 
+        token_type: str = payload.get("type")
+        if user_id is None or token_type != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+            
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        if not user or not user.is_verified:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+            
+        # Generate new tokens
+        new_access_token = create_user_access_token(user)
+        new_refresh_token = security.create_refresh_token(subject=str(user.id))
+        
+        response.set_cookie(
+            key="refresh_token",
+            value=new_refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="none",
+            max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+        )
+        
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer"
+        }
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("refresh_token", samesite="none", secure=True)
+    return {"message": "Logged out successfully"}
+
+
+@router.delete("/auth/me")
+async def delete_my_account(
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user)
+):
+    uid = current_user.id
+    
+    # Profile & Interests
+    profile = db.query(StudentProfile).filter(StudentProfile.user_id == uid).first()
+    if profile:
+        db.execute(profile_interests.delete().where(profile_interests.c.profile_id == profile.id))
+        db.delete(profile)
+        
+    # Conversations & Messages
+    db.query(Message).filter(Message.sender_id == uid).delete()
+    conversations = db.query(Conversation).filter((Conversation.user1_id == uid) | (Conversation.user2_id == uid)).all()
+    for conv in conversations:
+        db.query(Message).filter(Message.conversation_id == conv.id).delete()
+        db.delete(conv)
+        
+    # Interactions
+    db.query(MarketplaceInterest).filter(MarketplaceInterest.user_id == uid).delete()
+    db.query(ConfessionLike).filter(ConfessionLike.user_id == uid).delete()
+    db.query(Notification).filter(Notification.user_id == uid).delete()
+    
+    # Main Items
+    db.query(StudentApp).filter(StudentApp.user_id == uid).delete()
+    db.query(MarketplaceItem).filter(MarketplaceItem.user_id == uid).delete()
+    db.query(Confession).filter(Confession.user_id == uid).delete()
+    
+    # Finally User
+    user_to_delete = db.query(User).filter(User.id == uid).first()
+    if user_to_delete:
+        db.delete(user_to_delete)
+    db.commit()
+    
+    response.delete_cookie("refresh_token", samesite="none", secure=True)
+    return {"message": "Account successfully deleted."}
 
 
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def forgot_password(
     payload: ForgotPasswordRequest, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db), 
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     user = db.query(User).filter(User.email == payload.email).first()
+    generic_response = {
+        "message": "If an account exists with this email, a password reset code has been sent."
+    }
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        # Prevent user enumeration with generic success message
+        return generic_response
+
+    # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
+    try:
+        await check_otp_cooldown(redis_client, payload.email)
+        await check_email_otp_rate_limit(redis_client, payload.email)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            # Keep response content independent of whether the account exists.
+            return generic_response
+        raise
 
     otp_code = email_verification.generate_otp_code()
     
-    # Store verification OTP in Redis instead of the database model
+    # Store verification OTP and attempts in Redis
     reset_key = f"reset_password_otp:{payload.email}"
-    await redis_client.setex(reset_key, 600, otp_code)
+    reset_data = {
+        "otp": otp_code,
+        "attempts": 0
+    }
+    await redis_client.setex(reset_key, 600, json.dumps(reset_data))
 
     subject = "Reset your College Connect password"
     html_body = (
         f"<p>Hi,</p>"
         f"<p>Your password reset code is <strong>{otp_code}</strong>.</p>"
-        f"<p>Enter this code in the resetting your password.</p>"
+        f"<p>Enter this code in the app to reset your password.</p>"
         f"<p>If you did not request this, ignore this message.</p>"
     )
     plain_body = (
@@ -328,9 +644,15 @@ async def forgot_password(
         f"If you did not request this, ignore this message."
     )
 
-    _send_email_or_dev_fallback(to_address=user.email, subject=subject, html_body=html_body, plain_body=plain_body)
+    background_tasks.add_task(
+        _send_email_or_dev_fallback,
+        to_address=user.email, 
+        subject=subject, 
+        html_body=html_body, 
+        plain_body=plain_body
+    )
 
-    return {"message": "Password reset code sent to your email."}
+    return {"message": "If an account exists with this email, a password reset code has been sent."}
 
 
 @router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
@@ -344,9 +666,34 @@ async def reset_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     reset_key = f"reset_password_otp:{payload.email}"
-    stored_otp = await redis_client.get(reset_key)
-    if not stored_otp or stored_otp != payload.otp:
+    raw_data = await redis_client.get(reset_key)
+    if not raw_data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired reset code.")
+
+    try:
+        data = json.loads(raw_data)
+        correct_otp = data.get("otp")
+        attempts = data.get("attempts", 0)
+    except Exception:
+        correct_otp = raw_data
+        attempts = 0
+        data = {"otp": correct_otp, "attempts": 0}
+
+    if correct_otp != payload.otp:
+        attempts += 1
+        data["attempts"] = attempts
+        if attempts >= 5:
+            await redis_client.delete(reset_key)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many incorrect attempts. This reset code has been invalidated. Please request a new code."
+            )
+        await redis_client.setex(reset_key, 600, json.dumps(data))
+        remaining = 5 - attempts
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid reset code. {remaining} attempt(s) remaining."
+        )
 
     if len(payload.new_password.encode("utf-8")) > 72:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be 72 bytes or fewer.")
@@ -367,26 +714,3 @@ async def reset_password(
     await redis_client.delete(reset_key)
 
     return {"message": "Password reset successfully."}
-
-
-@router.post('/auth/delete-user')
-def delete_user(request: DeleteUserRequest, db: Session = Depends(get_db)):
-    if settings.ENV.lower() not in {'development', 'dev', 'test'}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail='User deletion is only allowed in development mode.',
-        )
-
-    user = db.query(User).filter(User.email == request.email).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found.')
-
-    profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
-    if profile:
-        db.execute(profile_interests.delete().where(profile_interests.c.profile_id == profile.id))
-        db.delete(profile)
-
-    db.delete(user)
-    db.commit()
-
-    return {"message": f"Deleted user {request.email}."}

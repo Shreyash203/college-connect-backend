@@ -80,9 +80,6 @@ class EmailService:
                 }
             raise RuntimeError("A verified ACS sender address must be configured in EMAIL_FROM or ACS_EMAIL_SENDER.")
 
-        print("Sending OTP email to:", to_address)
-        print("Using configured sender:", sender_address)
-
         message = {
             "senderAddress": sender_address,
             "content": {
@@ -101,7 +98,6 @@ class EmailService:
 
         try:
             poller = self.client.begin_send(message)
-            print("Email send started")
             response = poller.result()
             return response
         except Exception as exc:

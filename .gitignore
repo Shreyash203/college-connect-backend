@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 backend.db
 .env
+tests/load_tests/chat-test-accounts.local.json
+tests/load_tests/results/
 
 # Node
 node_modules/
