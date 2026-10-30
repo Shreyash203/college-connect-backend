@@ -67,4 +67,4 @@ jobs:
               "ENV=production" \
               "AZURE_KEY_VAULT_NAME=kv-college-connect-dev" \
               "APP_BASE_URL=https://ca-college-connect-frontend.ashygrass-6a4c76da.centralindia.azurecontainerapps.io" \
-              "CORS_ORIGINS=https://ca-college-connect-frontend.ashygrass-6a4c76da.centralindia.azurecontainerapps.io"
+              "CORS_ORIGINS=https://localhost,https://ca-college-connect-frontend.ashygrass-6a4c76da.centralindia.azurecontainerapps.io"
