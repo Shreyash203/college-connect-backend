@@ -79,11 +79,11 @@ def validate_image_url(image_url: str) -> bool:
         "http://",   # Local development
         "/",         # Relative URLs
     ]
-    
+
     for pattern in allowed_patterns:
         if pattern in image_url:
             return True
-    
+
     return False
 
 
@@ -189,10 +189,31 @@ def get_profile(
     current_user: AuthenticatedUser = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    from sqlalchemy import or_
-    profile = db.query(StudentProfile).filter(
-        or_(StudentProfile.id == profile_id, StudentProfile.user_id == profile_id)
-    ).first()
+    from app.core.visibility import college_domain
+    query = db.query(StudentProfile).join(User, StudentProfile.user_id == User.id).filter(
+        StudentProfile.id == profile_id
+    )
+    if not current_user.is_admin:
+        query = query.filter(User.college_domain == college_domain(current_user))
+    profile = query.first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile_to_response(profile)
+
+
+@router.get("/profiles/by-user/{user_id}", response_model=ProfileRead)
+def get_profile_by_user(
+    user_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_verified_user),
+    db: Session = Depends(get_db),
+):
+    from app.core.visibility import college_domain
+    query = db.query(StudentProfile).join(User, StudentProfile.user_id == User.id).filter(
+        StudentProfile.user_id == user_id
+    )
+    if not current_user.is_admin:
+        query = query.filter(User.college_domain == college_domain(current_user))
+    profile = query.first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile_to_response(profile)
@@ -201,21 +222,21 @@ def get_profile(
 @router.get("/profiles", response_model=List[ProfileRead])
 def list_profiles(
     category: str | None = None,
-    skip: int = 0, 
-    limit: int = 20, 
+    skip: int = 0,
+    limit: int = 20,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     from sqlalchemy import cast, Integer
 
     current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
-    
+
     query = (
         db.query(StudentProfile)
         .join(User, StudentProfile.user_id == User.id)
         .filter(StudentProfile.user_id != current_user.id)  # Exclude self
     )
-    
+
     if not current_user.is_admin:
         query = query.filter(User.college_domain == current_domain)
 
@@ -223,7 +244,7 @@ def list_profiles(
         my_profile = db.query(StudentProfile).filter(StudentProfile.user_id == current_user.id).first()
         if not my_profile:
             return []  # User needs a profile to use smart filters
-            
+
         if category == 'hobbies' and my_profile.interests:
             interest_names = [i.name for i in my_profile.interests]
             query = query.join(StudentProfile.interests).filter(Interest.name.in_(interest_names))
@@ -249,7 +270,7 @@ def get_profile_upload_url(
 ):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
-    
+
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'}
     ext = Path(filename).suffix.lower()
     if ext not in allowed_extensions:

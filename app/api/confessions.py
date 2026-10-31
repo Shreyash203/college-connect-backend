@@ -13,6 +13,8 @@ from app.core.verified_dependencies import get_current_verified_user
 
 from datetime import datetime, timedelta
 
+from app.core.visibility import can_view_confession
+
 router = APIRouter(prefix="/confessions", tags=["Confessions"])
 
 @router.post("/", response_model=ConfessionRead)
@@ -27,7 +29,7 @@ async def create_confession(
         Confession.user_id == current_user.id,
         Confession.created_at >= cutoff
     ).count()
-    
+
     if recent_confessions >= 3:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -35,7 +37,7 @@ async def create_confession(
         )
 
     college_domain = current_user.email.split("@")[-1] if "@" in current_user.email else "unknown"
-    
+
     new_confession = Confession(
         user_id=current_user.id,
         college_domain=college_domain,
@@ -45,7 +47,7 @@ async def create_confession(
     db.add(new_confession)
     db.commit()
     db.refresh(new_confession)
-    
+
     # Invalidate cache so the new post appears instantly
     redis = redis_service.get_client()
     try:
@@ -56,7 +58,7 @@ async def create_confession(
             await redis.delete(*keys)
     except Exception as e:
         print(f"Cache clearing error: {e}")
-    
+
     return ConfessionRead(
         id=new_confession.id,
         college_domain=new_confession.college_domain,
@@ -77,9 +79,9 @@ async def get_all_confessions(
         cache_key = f"cache:confessions:college:{current_user.college_domain}:{skip}:{limit}"
     else:
         cache_key = f"cache:confessions:global:{skip}:{limit}"
-        
+
     redis = redis_service.get_client()
-    
+
     data = None
     try:
         cached_data = await redis.get(cache_key)
@@ -91,10 +93,10 @@ async def get_all_confessions(
     if data is None:
         # Cache Miss - Auto-expiry: 48 hours cutoff
         cutoff = datetime.utcnow() - timedelta(hours=48)
-        
+
         def fetch_confessions_from_db():
             query = db.query(Confession).filter(Confession.created_at >= cutoff)
-            
+
             if scope == "college":
                 # College tab: only confessions explicitly posted to college, from same college
                 query = query.filter(
@@ -104,7 +106,7 @@ async def get_all_confessions(
             else:
                 # Global tab: only confessions explicitly posted globally
                 query = query.filter(Confession.scope == 'global')
-                
+
             confessions = (
                 query.order_by(Confession.created_at.desc())
                 .offset(skip)
@@ -113,14 +115,14 @@ async def get_all_confessions(
             )
             if not confessions:
                 return []
-                
+
             confession_ids = [c.id for c in confessions]
             likes = db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(confession_ids)).all()
-            
+
             likes_map = {cid: [] for cid in confession_ids}
             for like in likes:
                 likes_map[like.confession_id].append(like.user_id)
-                
+
             serialized_data = []
             for c in confessions:
                 serialized_data.append({
@@ -133,15 +135,15 @@ async def get_all_confessions(
                     "liked_by_users": likes_map[c.id]
                 })
             return serialized_data
-            
+
         data = await run_in_threadpool(fetch_confessions_from_db)
-        
+
         try:
             if data:
                 await redis.setex(cache_key, 60, json.dumps(data))
         except Exception:
             pass
-    
+
     results = []
     for item in data:
         results.append(ConfessionRead(
@@ -153,7 +155,7 @@ async def get_all_confessions(
             likes_count=len(item["liked_by_users"]),
             has_liked=current_user.id in item["liked_by_users"]
         ))
-        
+
     return results
 
 @router.get("/{confession_id}", response_model=ConfessionRead)
@@ -164,19 +166,10 @@ async def get_confession(
 ):
     """Fetch a single confession (used when opening a post from a notification)."""
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
-    if not confession:
+    if not confession or not can_view_confession(confession, current_user):
         raise HTTPException(status_code=404, detail="Confession not found")
 
     is_owner = confession.user_id == current_user.id
-    if not is_owner and not current_user.is_admin:
-        # Same visibility rules as the feed — respond 404 so hidden posts aren't revealed
-        expired = confession.created_at < datetime.utcnow() - timedelta(hours=48)
-        other_college = (
-            confession.scope == 'college'
-            and confession.college_domain != (current_user.college_domain or "unknown")
-        )
-        if expired or other_college:
-            raise HTTPException(status_code=404, detail="Confession not found")
 
     liked_by = [
         like.user_id
@@ -200,14 +193,14 @@ async def toggle_like(
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
-    if not confession:
+    if not confession or not can_view_confession(confession, current_user):
         raise HTTPException(status_code=404, detail="Confession not found")
-        
+
     existing_like = db.query(ConfessionLike).filter(
         ConfessionLike.confession_id == confession_id,
         ConfessionLike.user_id == current_user.id
     ).first()
-    
+
     if existing_like:
         db.delete(existing_like)
         liked = False
@@ -224,9 +217,9 @@ async def toggle_like(
                 link=f"/feed?confession={confession.id}&scope={confession.scope or 'global'}"
             )
             db.add(notif)
-        
+
     db.commit()
-    
+
     likes_count = db.query(ConfessionLike).filter(ConfessionLike.confession_id == confession_id).count()
     return {"liked": liked, "likes_count": likes_count}
 
@@ -239,13 +232,13 @@ async def delete_confession(
     confession = db.query(Confession).filter(Confession.id == confession_id).first()
     if not confession:
         raise HTTPException(status_code=404, detail="Confession not found")
-        
+
     if confession.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this confession")
-        
+
     db.delete(confession)
     db.commit()
-    
+
     # Invalidate cache so the deleted post disappears instantly
     redis = redis_service.get_client()
     try:

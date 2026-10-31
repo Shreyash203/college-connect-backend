@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from fastapi import HTTPException
 
 from app.api import auth
-from app.core.dependencies import decode_access_token, get_current_user
+from app.core.dependencies import decode_access_token
 
 
 class AuthRouteTests(unittest.TestCase):
@@ -28,15 +28,11 @@ class AuthRouteTests(unittest.TestCase):
 
         token = auth.create_user_access_token(user)
 
-        self.assertEqual(
-            decode_access_token(token),
-            get_current_user(token),
-        )
-        self.assertEqual(get_current_user(token).id, user.id)
-        self.assertEqual(get_current_user(token).email, user.email)
-        self.assertEqual(get_current_user(token).college_domain, user.college_domain)
-        self.assertTrue(get_current_user(token).is_verified)
-        self.assertFalse(get_current_user(token).is_admin)
+        self.assertEqual(decode_access_token(token).id, user.id)
+        self.assertEqual(decode_access_token(token).email, user.email)
+        self.assertEqual(decode_access_token(token).college_domain, user.college_domain)
+        self.assertTrue(decode_access_token(token).is_verified)
+        self.assertFalse(decode_access_token(token).is_admin)
 
     def test_access_token_without_required_claims_is_rejected(self):
         token = auth.security.create_refresh_token(subject="7")

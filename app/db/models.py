@@ -36,6 +36,16 @@ class User(Base):
     profile = relationship("StudentProfile", back_populates="user", uselist=False)
 
 
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    refresh_digest = Column(String(64), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+
+
 class StudentProfile(Base):
     image_url = Column(String, nullable=True)  # URL to Azure Blob image
     __tablename__ = "student_profiles"
@@ -90,7 +100,7 @@ class Confession(Base):
     content = Column(String(1000), nullable=False)
     scope = Column(String(20), nullable=False, default='global')  # 'global' or 'college'
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     user = relationship("User", backref="confessions")
 
 
@@ -110,7 +120,7 @@ class StudentApp(Base):
     app_url = Column(String(255), nullable=True)
     college_domain = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     user = relationship("User", backref="student_apps")
 
 

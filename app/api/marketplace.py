@@ -23,6 +23,8 @@ from app.core.azure_storage import (
     verify_azure_host_and_container,
 )
 
+from app.core.visibility import can_view_marketplace_item
+
 router = APIRouter()
 
 @router.get("/marketplace/items/upload-url", response_model=dict, dependencies=[Depends(DailyUploadRateLimiter(limit=20))])
@@ -32,7 +34,7 @@ def get_marketplace_upload_url(
 ):
     if not settings.AZURE_STORAGE_CONNECTION_STRING or not getattr(settings, "AZURE_STORAGE_CONTAINER_NAME", None):
         raise HTTPException(status_code=500, detail="Azure storage configuration missing.")
-    
+
     # Validate filename extension
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'}
     ext = Path(filename).suffix.lower()
@@ -46,7 +48,7 @@ def get_marketplace_upload_url(
         raise HTTPException(status_code=500, detail="Invalid storage connection string.")
 
     blob_name = f"marketplace_images/user_{current_user.id}/{uuid.uuid4()}{ext}"
-    
+
     # Ensure container exists and is publicly accessible
     blob_service = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service.get_container_client(settings.AZURE_STORAGE_CONTAINER_NAME)
@@ -63,7 +65,7 @@ def get_marketplace_upload_url(
         expiry=datetime.utcnow() + timedelta(hours=1),
     )
     upload_url = f"{container_client.url}/{blob_name}?{upload_sas_token}"
-    
+
     # Generate read-only SAS token for viewing (30 days) to bypass any strict Azure public access blocks
     read_sas_token = generate_blob_sas(
         account_name=account_name,
@@ -74,7 +76,7 @@ def get_marketplace_upload_url(
         expiry=datetime.utcnow() + timedelta(days=36500), # 100 years to prevent expiration
     )
     image_url = f"{container_client.url}/{blob_name}?{read_sas_token}"
-    
+
     return {"upload_url": upload_url, "image_url": image_url}
 
 @router.post("/marketplace/items", response_model=dict)
@@ -87,7 +89,7 @@ async def create_marketplace_item(
     active_count = db.query(MarketplaceItem).filter(MarketplaceItem.user_id == current_user.id).count()
     if active_count >= 3:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="You can only have 3 active items on the marketplace at a time. Please delete an old item to post a new one."
         )
 
@@ -132,7 +134,7 @@ async def create_marketplace_item(
     db.add(item)
     db.commit()
     db.refresh(item)
-    
+
     redis = redis_service.get_client()
     try:
         keys = await redis.keys("cache:marketplace:*")
@@ -140,7 +142,7 @@ async def create_marketplace_item(
             await redis.delete(*keys)
     except Exception:
         pass
-    
+
     return {
         "id": item.id,
         "title": item.title,
@@ -160,20 +162,20 @@ async def list_marketplace_items(
 ):
     # Auto-expiry: 14 days cutoff
     cutoff = datetime.utcnow() - timedelta(days=14)
-    
+
     def fetch_items():
         # Extract exact literal domain (e.g., alumni.iith.ac.in or iith.ac.in)
         current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
-        
+
         query = (
             db.query(MarketplaceItem)
             .join(User, MarketplaceItem.user_id == User.id)
             .filter(MarketplaceItem.created_at >= cutoff)
         )
-        
+
         if not current_user.is_admin:
             query = query.filter(User.college_domain == current_domain)
-            
+
         if q and q.strip():
             term = f"%{q.strip()}%"
             query = query.filter(
@@ -191,18 +193,18 @@ async def list_marketplace_items(
         )
         if not items:
             return []
-            
+
         item_ids = [i.id for i in items]
         interests = db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(item_ids)).all()
-        
+
         interest_map = {iid: [] for iid in item_ids}
         for interest in interests:
             interest_map[interest.item_id].append(interest.user_id)
-            
+
         return [(i, interest_map[i.id]) for i in items]
-        
+
     data = await run_in_threadpool(fetch_items)
-    
+
     results = []
     for i, interested_users in data:
         results.append({
@@ -216,7 +218,7 @@ async def list_marketplace_items(
             "interest_count": len(interested_users),
             "has_indicated_interest": current_user.id in interested_users
         })
-        
+
     return results
 
 @router.get("/marketplace/items/{item_id}", response_model=dict)
@@ -227,17 +229,10 @@ def get_marketplace_item(
 ):
     """Fetch a single listing (used when opening a listing from a notification)."""
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
-    if not item:
+    if not item or not can_view_marketplace_item(item, current_user):
         raise HTTPException(status_code=404, detail="Item not found")
 
     is_owner = item.user_id == current_user.id
-    if not is_owner and not current_user.is_admin:
-        # Same visibility rules as the list — respond 404 so hidden listings aren't revealed
-        current_domain = current_user.email.split('@')[-1] if '@' in current_user.email else ""
-        expired = item.created_at < datetime.utcnow() - timedelta(days=14)
-        other_college = not item.user or item.user.college_domain != current_domain
-        if expired or other_college:
-            raise HTTPException(status_code=404, detail="Item not found")
 
     interested_users = [
         i.user_id
@@ -262,14 +257,14 @@ async def toggle_interest(
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     item = db.query(MarketplaceItem).filter(MarketplaceItem.id == item_id).first()
-    if not item:
+    if not item or not can_view_marketplace_item(item, current_user):
         raise HTTPException(status_code=404, detail="Item not found")
-        
+
     existing = db.query(MarketplaceInterest).filter(
         MarketplaceInterest.item_id == item_id,
         MarketplaceInterest.user_id == current_user.id
     ).first()
-    
+
     if existing:
         db.delete(existing)
         interested = False
@@ -286,9 +281,9 @@ async def toggle_interest(
                 link=f"/marketplace?item={item.id}"
             )
             db.add(notif)
-        
+
     db.commit()
-    
+
     interest_count = db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id == item_id).count()
     return {"interested": interested, "interest_count": interest_count}
 
@@ -303,15 +298,15 @@ async def delete_marketplace_item(
         raise HTTPException(status_code=404, detail="Marketplace item not found")
     if item.user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Not authorized to delete this item")
-    
+
     image_url = item.image_url
-    
+
     db.delete(item)
     db.commit()
-    
+
     if image_url:
         await run_in_threadpool(delete_marketplace_blob, image_url, item.user_id)
-    
+
     redis = redis_service.get_client()
     try:
         keys = await redis.keys("cache:marketplace:*")
@@ -319,5 +314,5 @@ async def delete_marketplace_item(
             await redis.delete(*keys)
     except Exception:
         pass
-    
+
     return

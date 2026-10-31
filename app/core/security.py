@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
+import uuid
 
 from jose import jwt
 from passlib.context import CryptContext
@@ -24,6 +25,7 @@ def create_access_token(
     is_verified: bool,
     is_admin: bool,
     expires_delta: Optional[timedelta] = None,
+    session_id: Optional[str] = None,
 ) -> str:
     if expires_delta is None:
         expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -31,6 +33,7 @@ def create_access_token(
         "sub": subject,
         "exp": datetime.utcnow() + expires_delta,
         "type": "access",
+        "sid": session_id,
         "email": email,
         "college_domain": college_domain,
         "is_verified": is_verified,
@@ -39,12 +42,14 @@ def create_access_token(
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_refresh_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
+def create_refresh_token(subject: str, expires_delta: Optional[timedelta] = None, session_id: Optional[str] = None) -> str:
     if expires_delta is None:
         expires_delta = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": subject,
         "exp": datetime.utcnow() + expires_delta,
-        "type": "refresh"
+        "type": "refresh",
+        "sid": session_id,
+        "jti": str(uuid.uuid4()),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

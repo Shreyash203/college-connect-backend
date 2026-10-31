@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Body, BackgroundTasks, Header
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
@@ -14,10 +14,11 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.db.models import (
     User, StudentProfile, profile_interests, AuthorizedDomain,
-    MarketplaceItem, Confession, StudentApp, Notification, 
-    Conversation, Message, MarketplaceInterest, ConfessionLike
+    MarketplaceItem, Confession, StudentApp, Notification,
+    Conversation, Message, MarketplaceInterest, ConfessionLike, AuthSession
 )
-from app.core.dependencies import AuthenticatedUser, get_current_user
+from app.core.dependencies import AuthenticatedUser, get_current_user, decode_access_token
+from app.core.sessions import issue_session, decode_refresh_token, token_digest, revoke_session, revoke_user_sessions
 from app.core.redis import get_redis
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -49,13 +50,13 @@ def auto_create_default_profile(db: Session, user: User, google_picture: str = N
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == user.id).first()
     if not profile:
         display_name = google_name if google_name else user.email.split('@')[0].replace('.', ' ').title()
-        
+
         # Use Google Picture if available, otherwise generate a UI Avatar
         if google_picture:
             image_url = google_picture
         else:
             image_url = f"https://ui-avatars.com/api/?name={display_name.replace(' ', '+')}&background=random&color=fff&size=256"
-            
+
         default_profile = StudentProfile(
             user_id=user.id,
             display_name=display_name,
@@ -68,7 +69,7 @@ def auto_create_default_profile(db: Session, user: User, google_picture: str = N
         db.commit()
 
 
-def create_user_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
+def create_user_access_token(user: User, expires_delta: Optional[timedelta] = None, session_id: Optional[str] = None) -> str:
     return security.create_access_token(
         subject=str(user.id),
         email=user.email,
@@ -76,6 +77,7 @@ def create_user_access_token(user: User, expires_delta: Optional[timedelta] = No
         is_verified=user.is_verified,
         is_admin=user.is_admin,
         expires_delta=expires_delta,
+        session_id=session_id,
     )
 
 
@@ -138,21 +140,21 @@ async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, m
 
 @router.post("/auth/register", response_model=RegisterResponse, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def register(
-    user_create: UserCreate, 
+    user_create: UserCreate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db), 
+    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     email_domain = user_create.email.split("@")[-1].lower()
     is_admin_email = user_create.email.lower() in settings.admin_emails_list
-    
+
     if not is_admin_email:
         if email_domain == "gmail.com":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
-        
+
         is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
         if not is_authorized:
             if email_domain.endswith(('.ac.in', '.edu.in')):
@@ -222,9 +224,9 @@ async def register(
 
     background_tasks.add_task(
         _send_email_or_dev_fallback,
-        to_address=user_create.email, 
-        subject=subject, 
-        html_body=html_body, 
+        to_address=user_create.email,
+        subject=subject,
+        html_body=html_body,
         plain_body=plain_body
     )
 
@@ -233,9 +235,9 @@ async def register(
 
 @router.post("/auth/verify-registration", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=100, window_seconds=60))])
 async def verify_registration(
-    payload: VerifyRegistrationRequest, 
+    payload: VerifyRegistrationRequest,
     response: Response,
-    db: Session = Depends(get_db), 
+    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     pending_key = f"pending_registration:{payload.pending_id}"
@@ -284,9 +286,9 @@ async def verify_registration(
     await redis_client.delete(pending_key)
     await redis_client.delete(f"pending_email:{pending_data['email']}")
 
-    access_token = create_user_access_token(user)
-    refresh_token = security.create_refresh_token(subject=str(user.id))
-    
+    session_id, refresh_token = issue_session(db, user)
+    access_token = create_user_access_token(user, session_id=session_id)
+
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -295,17 +297,17 @@ async def verify_registration(
         samesite="none",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
-    
+
     return {
-        "access_token": access_token, 
-        "token_type": "bearer", 
+        "access_token": access_token,
+        "token_type": "bearer",
         "user_id": user.id
     }
 
 
 @router.post("/auth/resend-otp", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def resend_otp(
-    payload: ResendOtpRequest, 
+    payload: ResendOtpRequest,
     background_tasks: BackgroundTasks,
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
@@ -315,11 +317,11 @@ async def resend_otp(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration request not found or expired.")
 
     pending_data = json.loads(pending_data_str)
-    
+
     # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
     await check_otp_cooldown(redis_client, pending_data["email"])
     await check_email_otp_rate_limit(redis_client, pending_data["email"])
-    
+
     new_otp = email_verification.generate_otp_code()
     pending_data["otp"] = new_otp
     pending_data["attempts"] = 0
@@ -344,9 +346,9 @@ async def resend_otp(
 
     background_tasks.add_task(
         _send_email_or_dev_fallback,
-        to_address=pending_data["email"], 
-        subject=subject, 
-        html_body=html_body, 
+        to_address=pending_data["email"],
+        subject=subject,
+        html_body=html_body,
         plain_body=plain_body
     )
 
@@ -356,7 +358,7 @@ async def resend_otp(
 @router.post("/auth/login", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 def login(
     response: Response,
-    form_data: OAuth2PasswordRequestForm = Depends(), 
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.email == form_data.username).first()
@@ -374,12 +376,13 @@ def login(
 
     auto_create_default_profile(db, user)
 
+    session_id, refresh_token = issue_session(db, user)
     access_token = create_user_access_token(
         user,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        session_id=session_id,
     )
-    refresh_token = security.create_refresh_token(subject=str(user.id))
-    
+
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -388,9 +391,9 @@ def login(
         samesite="none",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
-    
+
     return {
-        "access_token": access_token, 
+        "access_token": access_token,
         "token_type": "bearer"
     }
 
@@ -399,15 +402,15 @@ import requests as http_requests
 
 @router.post("/auth/google", response_model=Token, dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 def google_login(
-    payload: GoogleLoginRequest, 
+    payload: GoogleLoginRequest,
     response: Response,
     db: Session = Depends(get_db)
 ):
     id_info = None
     try:
         id_info = google_id_token.verify_oauth2_token(
-            payload.credential, 
-            google_requests.Request(), 
+            payload.credential,
+            google_requests.Request(),
             settings.GOOGLE_CLIENT_ID
         )
     except Exception:
@@ -445,14 +448,14 @@ def google_login(
 
     domain = email.split("@")[-1].lower() if "@" in email else ""
     is_admin_email = email.lower() in settings.admin_emails_list
-    
+
     if not is_admin_email:
         if domain == "gmail.com":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
             )
-        
+
         is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == domain).first()
         if not is_authorized:
             if domain.endswith(('.ac.in', '.edu.in')):
@@ -487,12 +490,13 @@ def google_login(
     google_name = id_info.get("name")
     auto_create_default_profile(db, user, google_picture, google_name)
 
+    session_id, refresh_token = issue_session(db, user)
     access_token = create_user_access_token(
         user,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        session_id=session_id,
     )
-    refresh_token = security.create_refresh_token(subject=str(user.id))
-    
+
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -501,10 +505,10 @@ def google_login(
         samesite="none",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
-    
+
     return {
-        "access_token": access_token, 
-        "token_type": "bearer", 
+        "access_token": access_token,
+        "token_type": "bearer",
         "user_id": user.id
     }
 
@@ -517,39 +521,63 @@ def refresh_token(
 ):
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Refresh token missing")
-    try:
-        payload = jwt.decode(refresh_token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-        user_id: str = payload.get("sub") 
-        token_type: str = payload.get("type")
-        if user_id is None or token_type != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
-            
-        user = db.query(User).filter(User.id == int(user_id)).first()
-        if not user or not user.is_verified:
-            raise HTTPException(status_code=401, detail="User not found or inactive")
-            
-        # Generate new tokens
-        new_access_token = create_user_access_token(user)
-        new_refresh_token = security.create_refresh_token(subject=str(user.id))
-        
-        response.set_cookie(
-            key="refresh_token",
-            value=new_refresh_token,
-            httponly=True,
-            secure=True,
-            samesite="none",
-            max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
-        )
-        
-        return {
-            "access_token": new_access_token,
-            "token_type": "bearer"
-        }
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    payload = decode_refresh_token(refresh_token)
+    user_id = int(payload["sub"])
+    session_id = payload["sid"]
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_verified:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+
+    new_refresh_token = security.create_refresh_token(subject=str(user.id), session_id=session_id)
+    # Compare-and-swap is atomic across workers, so a refresh token is single-use.
+    rotated = db.query(AuthSession).filter(
+        AuthSession.id == session_id,
+        AuthSession.user_id == user_id,
+        AuthSession.refresh_digest == token_digest(refresh_token),
+        AuthSession.revoked_at.is_(None),
+        AuthSession.expires_at > datetime.utcnow(),
+    ).update({
+        "refresh_digest": token_digest(new_refresh_token),
+        "expires_at": datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+    }, synchronize_session=False)
+    if rotated != 1:
+        # Reuse of an older, correctly signed token revokes the session family.
+        revoke_session(db, session_id, user_id)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Session expired, revoked, or refresh token reused")
+    db.commit()
+    new_access_token = create_user_access_token(user, session_id=session_id)
+    response.set_cookie(
+        key="refresh_token", value=new_refresh_token, httponly=True,
+        secure=True, samesite="none",
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+    )
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
 
 @router.post("/auth/logout")
-async def logout(response: Response):
+def logout(
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    # Revoke either credential independently, including an expired access token's
+    # session when the still-valid refresh cookie is available.
+    if isinstance(refresh_token, str):
+        try:
+            claims = decode_refresh_token(refresh_token)
+            revoke_session(db, claims["sid"], int(claims["sub"]))
+        except HTTPException:
+            pass
+    if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
+        try:
+            claims = decode_access_token(authorization.split(None, 1)[1])
+            if claims.session_id:
+                revoke_session(db, claims.session_id, claims.id)
+        except HTTPException:
+            pass
+    db.commit()
     response.delete_cookie("refresh_token", samesite="none", secure=True)
     return {"message": "Logged out successfully"}
 
@@ -561,45 +589,47 @@ async def delete_my_account(
     current_user: AuthenticatedUser = Depends(get_current_user)
 ):
     uid = current_user.id
-    
+
     # Profile & Interests
     profile = db.query(StudentProfile).filter(StudentProfile.user_id == uid).first()
     if profile:
         db.execute(profile_interests.delete().where(profile_interests.c.profile_id == profile.id))
         db.delete(profile)
-        
+
     # Conversations & Messages
     db.query(Message).filter(Message.sender_id == uid).delete()
     conversations = db.query(Conversation).filter((Conversation.user1_id == uid) | (Conversation.user2_id == uid)).all()
     for conv in conversations:
         db.query(Message).filter(Message.conversation_id == conv.id).delete()
         db.delete(conv)
-        
+
     # Interactions
     db.query(MarketplaceInterest).filter(MarketplaceInterest.user_id == uid).delete()
     db.query(ConfessionLike).filter(ConfessionLike.user_id == uid).delete()
     db.query(Notification).filter(Notification.user_id == uid).delete()
-    
+
     # Main Items
     db.query(StudentApp).filter(StudentApp.user_id == uid).delete()
     db.query(MarketplaceItem).filter(MarketplaceItem.user_id == uid).delete()
     db.query(Confession).filter(Confession.user_id == uid).delete()
-    
+
+    db.query(AuthSession).filter(AuthSession.user_id == uid).delete()
+
     # Finally User
     user_to_delete = db.query(User).filter(User.id == uid).first()
     if user_to_delete:
         db.delete(user_to_delete)
     db.commit()
-    
+
     response.delete_cookie("refresh_token", samesite="none", secure=True)
     return {"message": "Account successfully deleted."}
 
 
 @router.post("/auth/forgot-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=30, window_seconds=60))])
 async def forgot_password(
-    payload: ForgotPasswordRequest, 
+    payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db), 
+    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     user = db.query(User).filter(User.email == payload.email).first()
@@ -621,7 +651,7 @@ async def forgot_password(
         raise
 
     otp_code = email_verification.generate_otp_code()
-    
+
     # Store verification OTP and attempts in Redis
     reset_key = f"reset_password_otp:{payload.email}"
     reset_data = {
@@ -646,9 +676,9 @@ async def forgot_password(
 
     background_tasks.add_task(
         _send_email_or_dev_fallback,
-        to_address=user.email, 
-        subject=subject, 
-        html_body=html_body, 
+        to_address=user.email,
+        subject=subject,
+        html_body=html_body,
         plain_body=plain_body
     )
 
@@ -657,8 +687,8 @@ async def forgot_password(
 
 @router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def reset_password(
-    payload: ResetPasswordRequest, 
-    db: Session = Depends(get_db), 
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     user = db.query(User).filter(User.email == payload.email).first()
@@ -703,6 +733,7 @@ async def reset_password(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
+    revoke_user_sessions(db, user.id)
     user.password_hash = password_hash
     # Clear legacy DB columns just in case
     user.reset_password_otp = None
