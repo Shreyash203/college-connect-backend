@@ -58,12 +58,13 @@ class TestOtpCooldown(unittest.IsolatedAsyncioTestCase):
             email="student@example.edu"
         )
 
-        response = await forgot_password(
-            ForgotPasswordRequest(email="student@example.edu"),
-            BackgroundTasks(),
-            db,
-            redis_client,
-        )
+        with unittest.mock.patch("app.core.database.SessionLocal") as factory:
+            factory.return_value.__enter__.return_value = db
+            response = await forgot_password(
+                ForgotPasswordRequest(email="student@example.edu"),
+                BackgroundTasks(),
+                redis_client,
+            )
 
         self.assertEqual(
             response,

@@ -11,6 +11,7 @@ from app.db.models import User, StudentProfile, Conversation, Message, Notificat
 from app.schemas.chat import ConversationRead, MessageRead
 from app.db.session import SessionLocal
 from app.core.redis import get_redis
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -140,6 +141,58 @@ def list_messages(
 
     return messages[::-1]
 
+def persist_chat_message(user_auth_id: int, conversation_id: int, content: str):
+    with SessionLocal() as db:
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if not conv or (conv.user1_id != user_auth_id and conv.user2_id != user_auth_id):
+            return None
+
+        # Derive recipient safely from conversation
+        target_user_id = conv.user2_id if conv.user1_id == user_auth_id else conv.user1_id
+
+        msg = Message(conversation_id=conversation_id, sender_id=user_auth_id, content=content)
+        db.add(msg)
+        db.flush()
+        conv.updated_at = msg.created_at
+        db.commit()
+        db.refresh(msg)
+
+        # Send Notification to target user
+        sender_profile = db.query(StudentProfile).filter(StudentProfile.user_id == user_auth_id).first()
+        sender_name = sender_profile.display_name if sender_profile else "Someone"
+
+        existing_notif = db.query(Notification).filter(
+            Notification.user_id == target_user_id,
+            Notification.is_read == False,
+            Notification.message == f"You have a new message from {sender_name} 💬"
+        ).first()
+
+        if not existing_notif:
+            notif = Notification(
+                user_id=target_user_id,
+                message=f"You have a new message from {sender_name} 💬",
+                link=f"/messages?conversationId={conversation_id}"
+            )
+            db.add(notif)
+            db.commit()
+
+        msg_data = {
+            "id": msg.id,
+            "conversation_id": msg.conversation_id,
+            "sender_id": msg.sender_id,
+            "content": msg.content,
+            "is_read": msg.is_read,
+            "created_at": msg.created_at.isoformat() + "Z"
+        }
+
+        return target_user_id, msg_data
+
+
+def authenticate_socket(token: str) -> int:
+    with SessionLocal() as db:
+        return authenticate_session(token, db).id
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, List[WebSocket]] = {}
@@ -169,12 +222,11 @@ class ConnectionManager:
     async def send_personal_message(self, message_json: str, user_id: int):
         if user_id in self.active_connections:
             dead_connections = []
-            for connection in self.active_connections[user_id]:
+            for connection in list(self.active_connections[user_id]):
                 try:
                     token = getattr(connection.state, "auth_token", None)
                     if isinstance(token, str):
-                        with SessionLocal() as db:
-                            authenticate_session(token, db)
+                        await run_in_threadpool(authenticate_socket, token)
                     await connection.send_text(message_json)
                 except Exception:
                     try:
@@ -216,8 +268,7 @@ async def redis_listener():
 @router.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     try:
-        with SessionLocal() as db:
-            user_auth_id = authenticate_session(token, db).id
+        user_auth_id = await run_in_threadpool(authenticate_socket, token)
         websocket.state.auth_token = token
     except Exception:
         await websocket.close(code=1008)
@@ -230,8 +281,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         while True:
             data = await websocket.receive_text()
             try:
-                with SessionLocal() as auth_db:
-                    authenticate_session(token, auth_db)
+                await run_in_threadpool(authenticate_socket, token)
             except HTTPException:
                 await websocket.close(code=1008)
                 break
@@ -248,47 +298,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 await websocket.send_text(json.dumps({"error": "Content invalid or exceeds 1000 characters"}))
                 continue
 
-            with SessionLocal() as db:
-                conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-                if not conv or (conv.user1_id != user_auth_id and conv.user2_id != user_auth_id):
-                    continue
-
-                # Derive recipient safely from conversation
-                target_user_id = conv.user2_id if conv.user1_id == user_auth_id else conv.user1_id
-
-                msg = Message(conversation_id=conversation_id, sender_id=user_auth_id, content=content)
-                db.add(msg)
-                conv.updated_at = msg.created_at
-                db.commit()
-                db.refresh(msg)
-
-                # Send Notification to target user
-                sender_profile = db.query(StudentProfile).filter(StudentProfile.user_id == user_auth_id).first()
-                sender_name = sender_profile.display_name if sender_profile else "Someone"
-
-                existing_notif = db.query(Notification).filter(
-                    Notification.user_id == target_user_id,
-                    Notification.is_read == False,
-                    Notification.message == f"You have a new message from {sender_name} 💬"
-                ).first()
-
-                if not existing_notif:
-                    notif = Notification(
-                        user_id=target_user_id,
-                        message=f"You have a new message from {sender_name} 💬",
-                        link=f"/messages?conversationId={conversation_id}"
-                    )
-                    db.add(notif)
-                    db.commit()
-
-                msg_data = {
-                    "id": msg.id,
-                    "conversation_id": msg.conversation_id,
-                    "sender_id": msg.sender_id,
-                    "content": msg.content,
-                    "is_read": msg.is_read,
-                    "created_at": msg.created_at.isoformat() + "Z"
-                }
+            saved = await run_in_threadpool(persist_chat_message, user_auth_id, conversation_id, content)
+            if saved is None:
+                continue
+            target_user_id, msg_data = saved
 
             msg_json = json.dumps(msg_data)
             await redis_client.publish(f"chat:{target_user_id}", msg_json)

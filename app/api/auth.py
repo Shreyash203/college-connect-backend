@@ -20,6 +20,8 @@ from app.db.models import (
 from app.core.dependencies import AuthenticatedUser, get_current_user, decode_access_token
 from app.core.sessions import issue_session, decode_refresh_token, token_digest, revoke_session, revoke_user_sessions
 from app.core.redis import get_redis
+from app.core.database import run_db
+from fastapi.concurrency import run_in_threadpool
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
@@ -142,43 +144,45 @@ async def check_email_otp_rate_limit(redis_client: aioredis.Redis, email: str, m
 async def register(
     user_create: UserCreate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
-    email_domain = user_create.email.split("@")[-1].lower()
-    is_admin_email = user_create.email.lower() in settings.admin_emails_list
+    def operation(db: Session):
+        email_domain = user_create.email.split("@")[-1].lower()
+        is_admin_email = user_create.email.lower() in settings.admin_emails_list
 
-    if not is_admin_email:
-        if email_domain == "gmail.com":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
-            )
-
-        is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
-        if not is_authorized:
-            if email_domain.endswith(('.ac.in', '.edu.in')):
-                try:
-                    new_domain = AuthorizedDomain(domain=email_domain)
-                    db.add(new_domain)
-                    db.commit()
-                except Exception:
-                    db.rollback() # Handle rare race conditions cleanly
-            else:
+        if not is_admin_email:
+            if email_domain == "gmail.com":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Only authorized email domains are permitted.",
+                    detail="Personal email addresses like @gmail.com are not permitted. Please use your college email ending in .ac.in or .edu.in."
                 )
 
-    if len(user_create.password.encode("utf-8")) > 72:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be 72 bytes or fewer.",
-        )
+            is_authorized = db.query(AuthorizedDomain).filter(AuthorizedDomain.domain == email_domain).first()
+            if not is_authorized:
+                if email_domain.endswith(('.ac.in', '.edu.in')):
+                    try:
+                        new_domain = AuthorizedDomain(domain=email_domain)
+                        db.add(new_domain)
+                        db.commit()
+                    except Exception:
+                        db.rollback() # Handle rare race conditions cleanly
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Only authorized email domains are permitted.",
+                    )
 
-    existing = db.query(User).filter(User.email == user_create.email).first()
-    if existing:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
+        if len(user_create.password.encode("utf-8")) > 72:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password must be 72 bytes or fewer.",
+            )
+
+        existing = db.query(User).filter(User.email == user_create.email).first()
+        if existing:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
+
+    await run_db(operation)
 
     # Enforce 30s cooldown and per-email rate limit to cap Azure email costs
     await check_otp_cooldown(redis_client, user_create.email)
@@ -189,7 +193,7 @@ async def register(
     otp_code = email_verification.generate_otp_code()
 
     try:
-        password_hash = security.get_password_hash(user_create.password)
+        password_hash = await run_in_threadpool(security.get_password_hash, user_create.password)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
@@ -237,7 +241,6 @@ async def register(
 async def verify_registration(
     payload: VerifyRegistrationRequest,
     response: Response,
-    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
     pending_key = f"pending_registration:{payload.pending_id}"
@@ -264,30 +267,38 @@ async def verify_registration(
             detail=f"Invalid verification code. {remaining} attempt(s) remaining."
         )
 
-    existing_user = db.query(User).filter(User.email == pending_data["email"]).first()
-    if existing_user:
-        await redis_client.delete(pending_key)
-        await redis_client.delete(f"pending_email:{pending_data['email']}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
+    def operation(db: Session):
+        existing_user = db.query(User).filter(User.email == pending_data["email"]).first()
+        if existing_user:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered.")
 
-    user = User(
-        email=pending_data["email"],
-        college_domain=pending_data["email"].split('@')[-1] if '@' in pending_data["email"] else "",
-        password_hash=pending_data["password_hash"],
-        is_verified=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+        user = User(
+            email=pending_data["email"],
+            college_domain=pending_data["email"].split('@')[-1] if '@' in pending_data["email"] else "",
+            password_hash=pending_data["password_hash"],
+            is_verified=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
-    auto_create_default_profile(db, user)
+        auto_create_default_profile(db, user)
 
-    # Clean up Redis records
+
+        session_id, refresh_token = issue_session(db, user)
+        access_token = create_user_access_token(user, session_id=session_id)
+
+        return access_token, refresh_token, user.id
+
+    try:
+        access_token, refresh_token, user_id = await run_db(operation)
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            await redis_client.delete(pending_key)
+            await redis_client.delete(f"pending_email:{pending_data['email']}")
+        raise
     await redis_client.delete(pending_key)
     await redis_client.delete(f"pending_email:{pending_data['email']}")
-
-    session_id, refresh_token = issue_session(db, user)
-    access_token = create_user_access_token(user, session_id=session_id)
 
     response.set_cookie(
         key="refresh_token",
@@ -301,7 +312,7 @@ async def verify_registration(
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user_id": user.id
+        "user_id": user_id
     }
 
 
@@ -583,7 +594,7 @@ def logout(
 
 
 @router.delete("/auth/me")
-async def delete_my_account(
+def delete_my_account(
     response: Response,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user)
@@ -629,14 +640,17 @@ async def delete_my_account(
 async def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
-    user = db.query(User).filter(User.email == payload.email).first()
+    def lookup(db: Session):
+        user = db.query(User).filter(User.email == payload.email).first()
+        return user.email if user else None
+
+    email = await run_db(lookup)
     generic_response = {
         "message": "If an account exists with this email, a password reset code has been sent."
     }
-    if not user:
+    if not email:
         # Prevent user enumeration with generic success message
         return generic_response
 
@@ -676,7 +690,7 @@ async def forgot_password(
 
     background_tasks.add_task(
         _send_email_or_dev_fallback,
-        to_address=user.email,
+        to_address=email,
         subject=subject,
         html_body=html_body,
         plain_body=plain_body
@@ -688,11 +702,12 @@ async def forgot_password(
 @router.post("/auth/reset-password", dependencies=[Depends(SlidingWindowRateLimiter(limit=50, window_seconds=60))])
 async def reset_password(
     payload: ResetPasswordRequest,
-    db: Session = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis)
 ):
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user:
+    def check_user(db: Session):
+        return db.query(User.id).filter(User.email == payload.email).first() is not None
+
+    if not await run_db(check_user):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     reset_key = f"reset_password_otp:{payload.email}"
@@ -729,17 +744,23 @@ async def reset_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be 72 bytes or fewer.")
 
     try:
-        password_hash = security.get_password_hash(payload.new_password)
+        password_hash = await run_in_threadpool(security.get_password_hash, payload.new_password)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    revoke_user_sessions(db, user.id)
-    user.password_hash = password_hash
-    # Clear legacy DB columns just in case
-    user.reset_password_otp = None
-    user.reset_password_otp_expires_at = None
-    db.add(user)
-    db.commit()
+    def operation(db: Session):
+        user = db.query(User).filter(User.email == payload.email).first()
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+        revoke_user_sessions(db, user.id)
+        user.password_hash = password_hash
+        # Clear legacy DB columns just in case
+        user.reset_password_otp = None
+        user.reset_password_otp_expires_at = None
+        db.add(user)
+        db.commit()
+
+    await run_db(operation)
 
     # Clear OTP from Redis cache
     await redis_client.delete(reset_key)

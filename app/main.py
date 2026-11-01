@@ -10,6 +10,7 @@ Base.metadata.create_all(bind=engine)
 sync_event_schema(engine)
 
 import asyncio
+from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from app.core.redis import redis_service
@@ -17,31 +18,35 @@ from app.db.session import SessionLocal
 from app.db.models import Confession, MarketplaceItem, ConfessionLike, MarketplaceInterest
 from app.core.azure_storage import delete_marketplace_blob
 
+def purge_expired_records():
+    with SessionLocal() as db:
+        cutoff = datetime.utcnow() - timedelta(hours=48)
+        expired_confessions = db.query(Confession.id).filter(Confession.created_at < cutoff).all()
+        expired_confession_ids = [c[0] for c in expired_confessions]
+
+        if expired_confession_ids:
+            db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(expired_confession_ids)).delete(synchronize_session=False)
+            db.query(Confession).filter(Confession.id.in_(expired_confession_ids)).delete(synchronize_session=False)
+
+        bazaar_cutoff = datetime.utcnow() - timedelta(days=14)
+        expired_items = db.query(MarketplaceItem).filter(MarketplaceItem.created_at < bazaar_cutoff).all()
+        if expired_items:
+            expired_item_ids = [i.id for i in expired_items]
+            # Clean up orphaned images from Azure Blob Storage
+            for item in expired_items:
+                if item.image_url:
+                    delete_marketplace_blob(item.image_url, owner_user_id=item.user_id)
+
+            db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(expired_item_ids)).delete(synchronize_session=False)
+            db.query(MarketplaceItem).filter(MarketplaceItem.id.in_(expired_item_ids)).delete(synchronize_session=False)
+
+        db.commit()
+
+
 async def purge_expired_confessions_loop():
     while True:
         try:
-            with SessionLocal() as db:
-                cutoff = datetime.utcnow() - timedelta(hours=48)
-                expired_confessions = db.query(Confession.id).filter(Confession.created_at < cutoff).all()
-                expired_confession_ids = [c[0] for c in expired_confessions]
-                
-                if expired_confession_ids:
-                    db.query(ConfessionLike).filter(ConfessionLike.confession_id.in_(expired_confession_ids)).delete(synchronize_session=False)
-                    db.query(Confession).filter(Confession.id.in_(expired_confession_ids)).delete(synchronize_session=False)
-                
-                bazaar_cutoff = datetime.utcnow() - timedelta(days=14)
-                expired_items = db.query(MarketplaceItem).filter(MarketplaceItem.created_at < bazaar_cutoff).all()
-                if expired_items:
-                    expired_item_ids = [i.id for i in expired_items]
-                    # Clean up orphaned images from Azure Blob Storage
-                    for item in expired_items:
-                        if item.image_url:
-                            delete_marketplace_blob(item.image_url, owner_user_id=item.user_id)
-                    
-                    db.query(MarketplaceInterest).filter(MarketplaceInterest.item_id.in_(expired_item_ids)).delete(synchronize_session=False)
-                    db.query(MarketplaceItem).filter(MarketplaceItem.id.in_(expired_item_ids)).delete(synchronize_session=False)
-                
-                db.commit()
+            await run_in_threadpool(purge_expired_records)
         except Exception as e:
             print(f"[Purge Task] Error: {e}")
         await asyncio.sleep(12 * 3600)

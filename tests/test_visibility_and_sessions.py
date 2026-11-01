@@ -1,4 +1,5 @@
 import json
+import asyncio
 from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
@@ -20,21 +21,16 @@ from app.schemas.auth import ResetPasswordRequest, GoogleLoginRequest, VerifyReg
 
 
 def immediate(coro):
-    """Drive mocked, non-suspending coroutines without Windows socket-pair setup."""
-    try:
-        coro.send(None)
-    except StopIteration as result:
-        return result.value
-    finally:
-        coro.close()
-    raise AssertionError('Unexpected external I/O in isolated regression test')
+    return asyncio.run(coro)
 
 
 @pytest.fixture
-def db():
-    engine = create_engine('sqlite:///:memory:')
+def db(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'security.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr("app.core.database.SessionLocal", factory)
+    session = factory()
     session.add_all([
         User(id=1, email='one@alpha.ac.in', college_domain='alpha.ac.in', password_hash='hash', is_verified=True),
         User(id=2, email='two@beta.ac.in', college_domain='beta.ac.in', password_hash='hash', is_verified=True),
@@ -84,36 +80,36 @@ def test_profile_id_does_not_fall_back_to_user_id(db):
 
 def test_foreign_marketplace_detail_and_interest_are_hidden(db):
     assert rejected(lambda: marketplace.get_marketplace_item(1, db, student())) == 404
-    assert rejected(lambda: immediate(marketplace.toggle_interest(1, db, student()))) == 404
+    assert rejected(lambda: marketplace.toggle_interest(1, db, student())) == 404
     assert db.query(MarketplaceInterest).count() == 0
     assert db.query(Notification).count() == 0
 
 
 def test_same_college_interest_and_admin_access_continue_to_work(db):
-    assert immediate(marketplace.toggle_interest(2, db, student()))['interested']
-    assert immediate(marketplace.toggle_interest(1, db, student(admin=True)))['interested']
+    assert marketplace.toggle_interest(2, db, student())['interested']
+    assert marketplace.toggle_interest(1, db, student(admin=True))['interested']
 
 
 def test_private_foreign_confession_detail_and_like_are_hidden(db):
-    assert rejected(lambda: immediate(confessions.get_confession(1, db, student()))) == 404
-    assert rejected(lambda: immediate(confessions.toggle_like(1, db, student()))) == 404
+    assert rejected(lambda: confessions.get_confession(1, db, student())) == 404
+    assert rejected(lambda: confessions.toggle_like(1, db, student())) == 404
     assert db.query(ConfessionLike).count() == 0
     assert db.query(Notification).count() == 0
 
 
 def test_global_and_same_college_confessions_remain_accessible(db):
     for id in [2, 3]:
-        assert immediate(confessions.get_confession(id, db, student())).id == id
-        assert immediate(confessions.toggle_like(id, db, student()))['liked']
-    assert immediate(confessions.toggle_like(1, db, student(admin=True)))['liked']
+        assert confessions.get_confession(id, db, student()).id == id
+        assert confessions.toggle_like(id, db, student())['liked']
+    assert confessions.toggle_like(1, db, student(admin=True))['liked']
 
 
 def test_expired_content_cannot_be_reacted_to_by_other_users(db):
     db.get(MarketplaceItem, 2).created_at = datetime.utcnow() - timedelta(days=15)
     db.get(Confession, 3).created_at = datetime.utcnow() - timedelta(hours=49)
     db.commit()
-    assert rejected(lambda: immediate(marketplace.toggle_interest(2, db, student()))) == 404
-    assert rejected(lambda: immediate(confessions.toggle_like(3, db, student()))) == 404
+    assert rejected(lambda: marketplace.toggle_interest(2, db, student())) == 404
+    assert rejected(lambda: confessions.toggle_like(3, db, student())) == 404
 
 
 def credentials(db, id=1):
@@ -174,11 +170,12 @@ def test_password_reset_revokes_all_devices_but_not_another_user(db):
     _, other_access, _ = credentials(db, 3)
     redis = SimpleNamespace(get=AsyncMock(return_value=json.dumps({'otp': '123456', 'attempts': 0})), delete=AsyncMock())
     payload = ResetPasswordRequest(email='one@alpha.ac.in', otp='123456', new_password='AnewSecurePass123!')
-    immediate(auth.reset_password(payload, db, redis))
+    immediate(auth.reset_password(payload, redis))
     for access, refresh in [(access1, refresh1), (access2, refresh2)]:
         assert rejected(lambda: authenticate_session(access, db)) == 401
         assert rejected(lambda: auth.refresh_token(Response(), refresh, db)) == 401
     assert authenticate_session(other_access, db).id == 3
+    db.expire_all()
     assert security.verify_password(payload.new_password, db.get(User, 1).password_hash)
 
 
@@ -222,7 +219,7 @@ def test_verified_registration_creates_an_authorized_session(db):
         delete=AsyncMock(),
     )
     response = Response()
-    result = immediate(auth.verify_registration(VerifyRegistrationRequest(pending_id='pending', otp='123456'), response, db, redis))
+    result = immediate(auth.verify_registration(VerifyRegistrationRequest(pending_id='pending', otp='123456'), response, redis))
     assert authenticate_session(result['access_token'], db).email == 'new@alpha.ac.in'
     assert auth.refresh_token(Response(), cookie(response), db)['access_token']
 

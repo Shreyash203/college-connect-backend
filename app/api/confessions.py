@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from app.core.rate_limiter import SlidingWindowRateLimiter
-from fastapi.concurrency import run_in_threadpool
 from app.core.redis import redis_service
+from app.core.database import run_db
 import json
 
 from app.core.dependencies import AuthenticatedUser, get_db
@@ -20,33 +20,43 @@ router = APIRouter(prefix="/confessions", tags=["Confessions"])
 @router.post("/", response_model=ConfessionRead)
 async def create_confession(
     confession_in: ConfessionCreate,
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
-    # User-based rate limiter: max 3 confessions per hour
-    cutoff = datetime.utcnow() - timedelta(hours=1)
-    recent_confessions = db.query(Confession).filter(
-        Confession.user_id == current_user.id,
-        Confession.created_at >= cutoff
-    ).count()
+    def operation(db: Session):
+        # User-based rate limiter: max 3 confessions per hour
+        cutoff = datetime.utcnow() - timedelta(hours=1)
+        recent_confessions = db.query(Confession).filter(
+            Confession.user_id == current_user.id,
+            Confession.created_at >= cutoff
+        ).count()
 
-    if recent_confessions >= 3:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="You can only post 3 confessions per hour to prevent spam."
+        if recent_confessions >= 3:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="You can only post 3 confessions per hour to prevent spam."
+            )
+
+        college_domain = current_user.email.split("@")[-1] if "@" in current_user.email else "unknown"
+
+        new_confession = Confession(
+            user_id=current_user.id,
+            college_domain=college_domain,
+            content=confession_in.content,
+            scope=confession_in.scope if confession_in.scope in ('global', 'college') else 'global'
+        )
+        db.add(new_confession)
+        db.commit()
+        db.refresh(new_confession)
+        return ConfessionRead(
+            id=new_confession.id,
+            college_domain=new_confession.college_domain,
+            content=new_confession.content,
+            created_at=new_confession.created_at,
+            is_mine=True
         )
 
-    college_domain = current_user.email.split("@")[-1] if "@" in current_user.email else "unknown"
 
-    new_confession = Confession(
-        user_id=current_user.id,
-        college_domain=college_domain,
-        content=confession_in.content,
-        scope=confession_in.scope if confession_in.scope in ('global', 'college') else 'global'
-    )
-    db.add(new_confession)
-    db.commit()
-    db.refresh(new_confession)
+    result = await run_db(operation)
 
     # Invalidate cache so the new post appears instantly
     redis = redis_service.get_client()
@@ -59,20 +69,13 @@ async def create_confession(
     except Exception as e:
         print(f"Cache clearing error: {e}")
 
-    return ConfessionRead(
-        id=new_confession.id,
-        college_domain=new_confession.college_domain,
-        content=new_confession.content,
-        created_at=new_confession.created_at,
-        is_mine=True
-    )
+    return result
 
 @router.get("/", response_model=List[ConfessionRead])
 async def get_all_confessions(
     skip: int = 0,
     limit: int = 20,
     scope: str = "global",
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
     if scope == "college" and current_user.college_domain:
@@ -94,7 +97,7 @@ async def get_all_confessions(
         # Cache Miss - Auto-expiry: 48 hours cutoff
         cutoff = datetime.utcnow() - timedelta(hours=48)
 
-        def fetch_confessions_from_db():
+        def fetch_confessions_from_db(db: Session):
             query = db.query(Confession).filter(Confession.created_at >= cutoff)
 
             if scope == "college":
@@ -136,7 +139,7 @@ async def get_all_confessions(
                 })
             return serialized_data
 
-        data = await run_in_threadpool(fetch_confessions_from_db)
+        data = await run_db(fetch_confessions_from_db)
 
         try:
             if data:
@@ -159,7 +162,7 @@ async def get_all_confessions(
     return results
 
 @router.get("/{confession_id}", response_model=ConfessionRead)
-async def get_confession(
+def get_confession(
     confession_id: int,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
@@ -187,7 +190,7 @@ async def get_confession(
     )
 
 @router.post("/{confession_id}/like")
-async def toggle_like(
+def toggle_like(
     confession_id: int,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
@@ -226,18 +229,20 @@ async def toggle_like(
 @router.delete("/{confession_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_confession(
     confession_id: int,
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_verified_user)
 ):
-    confession = db.query(Confession).filter(Confession.id == confession_id).first()
-    if not confession:
-        raise HTTPException(status_code=404, detail="Confession not found")
+    def operation(db: Session):
+        confession = db.query(Confession).filter(Confession.id == confession_id).first()
+        if not confession:
+            raise HTTPException(status_code=404, detail="Confession not found")
 
-    if confession.user_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this confession")
+        if confession.user_id != current_user.id and not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this confession")
 
-    db.delete(confession)
-    db.commit()
+        db.delete(confession)
+        db.commit()
+
+    await run_db(operation)
 
     # Invalidate cache so the deleted post disappears instantly
     redis = redis_service.get_client()
